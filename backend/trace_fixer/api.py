@@ -42,6 +42,20 @@ def list_traces(q: str | None = None, limit: int = 200):
     return {"trace_ids": store.list_ids(query=q, limit=limit), "total": store.count()}
 
 
+@app.get("/api/traces/{trace_id}/neighbor")
+def trace_neighbor(trace_id: str, direction: str, q: str | None = None):
+    if direction not in ("prev", "next"):
+        raise HTTPException(status_code=400, detail="direction must be 'prev' or 'next'")
+    ids = store.list_ids(query=q)  # unlimited -- the full matching list, so this scales with the corpus
+    if trace_id not in ids:
+        raise HTTPException(status_code=404, detail=f"'{trace_id}' is not in the current trace list")
+    if len(ids) < 2:
+        return {"trace_id": trace_id, "index": 0, "total": len(ids)}
+    idx = ids.index(trace_id)
+    new_idx = (idx - 1) % len(ids) if direction == "prev" else (idx + 1) % len(ids)
+    return {"trace_id": ids[new_idx], "index": new_idx, "total": len(ids)}
+
+
 class UploadResponse(BaseModel):
     trace_id: str
 
@@ -134,6 +148,32 @@ def predict_clear(trace_id: str):
     clear_predictions(trace)
     run_validation(trace)
     return {"scene": build_scene_json(trace)}
+
+
+@app.post("/api/traces/{trace_id}/batch_fix_predict")
+def batch_fix_predict(trace_id: str, req: PredictRequest = PredictRequest()):
+    """One-shot validate -> fix -> predict -> re-validate for a single trace,
+    with no scene payload in the response -- meant to be called in a loop
+    over many trace_ids (see the GUI's multi-select "batch" action) without
+    paying for a full scene JSON build on every one.
+    """
+    try:
+        trace = store.get(trace_id)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Unknown trace_id '{trace_id}'")
+    before = run_validation(trace)
+    fix_summary = apply_fixes(trace)
+    added = predict_all(
+        trace, horizon_s=req.horizon_s, step_s=req.step_s, backward=req.backward, forward=req.forward
+    )
+    after = run_validation(trace)
+    return {
+        "trace_id": trace_id,
+        "before_issue_count": len(before),
+        "after_issue_count": len(after),
+        "fix_summary": fix_summary,
+        "predicted": added,
+    }
 
 
 class SyncOffsetRequest(BaseModel):

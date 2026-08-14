@@ -48,7 +48,9 @@ python3 -m pytest
 1. **Pick a trace** from the trace picker (top bar) — it's a searchable
    list, not a plain dropdown, so it stays usable with a corpus of
    thousands (type to filter; it queries the server rather than holding
-   every trace client-side).
+   every trace client-side). The **◀ / ▶** buttons beside it step to the
+   previous/next trace in the current list — if you've typed a search
+   filter, stepping stays within those filtered results.
 2. **Run validation** to flag implausible vehicle motion, collisions, and
    off-road excursions in the issue list. Click an issue to jump the
    timeline to it and highlight the vehicle.
@@ -99,6 +101,22 @@ to a longest-prefix match for anything else. Unmatched files on either side
 are reported in the scan summary rather than silently dropped. Scanned
 traces are registered *by reference* — nothing is copied or parsed until you
 actually open one, so scanning ~20,000 files takes well under a second.
+
+### Batch fix + predict
+
+Open the trace picker, check the traces you want (or **Select shown** to
+grab every trace currently listed — narrow it with a search first if you
+only want a subset of a big corpus), then **Fix + predict selected**. Each
+selected trace is processed server-side, one at a time, through the full
+validate → fix → predict outside FOV → re-validate pipeline (the same steps
+the individual buttons run), with live progress and a final "issues before
+→ after" summary; failures on individual traces (e.g. an unparseable file)
+are reported by name rather than aborting the batch. If the trace you're
+currently viewing was included, it's reloaded afterward so the GUI reflects
+the result. This only runs the two auto-fixable steps — it doesn't export
+anything on its own, so pair it with the per-trace export buttons (or script
+against the same `/export/*` endpoints) for the traces you want to pull out
+afterward.
 
 ## Architecture
 
@@ -190,6 +208,36 @@ and explainable rules are what an annotation QA team can act on directly.
 | Off-road | Vehicle crosses the nearest annotated Road Edge / Guardrail boundary | Yes — lateral clamp back inside the corridor (+ margin) |
 | Collision (vehicle↔ego) | Bounding boxes overlap | Trailing overlaps (track ends inside the ego box — a common "lost track as it merged" artifact) are trimmed. Mid-track overlaps are flagged only |
 | Collision (vehicle↔vehicle) | Bounding boxes overlap | Flagged only (no auto-fix — resolving which of two vehicles is "wrong" isn't well-defined without more context, including between two independently-predicted pre-FOV segments) |
+
+### Why vehicle heading looks "botched" before you fix it
+
+The annotation's `zrot` field (vehicle heading offset from ego) is *not*
+tracked continuously frame-by-frame. Plotting it out shows long runs of an
+exact, bit-for-bit-identical value across dozens to hundreds of consecutive
+frames (e.g. one vehicle in the sample trace holds `zrot = 13.8°` for 295
+frames straight), interrupted by occasional single-frame spikes to an
+unrelated value, while the vehicle's tracked *position* changes smoothly
+every frame throughout. That pattern — long constant holds, sharp jumps, no
+frame-to-frame drift — is the signature of a sparse, held/keyframed value
+from the labeling tool, not per-frame sensor noise. Meanwhile the vehicle's
+true direction of travel, computed independently from its position deltas,
+tracks smoothly and consistently the whole time (confirmed against the
+sample trace, where it stays within a couple of degrees of the ego heading
+throughout, as expected for same-direction highway traffic). In other
+words: the raw annotation data is what's inconsistent here, not Trace
+Fixer's decoding of it — `heading_deg = ego_yaw + zrot` reproduces this
+held-then-jumps pattern faithfully because that's genuinely what's in the
+file.
+
+This is exactly what **Apply fixes** already corrects: it re-derives each
+vehicle's heading from the tangent of its *smoothed position path* rather
+than trusting `zrot` at all, then re-encodes the corrected heading back into
+the exported ego-relative `zrot`. After fixing, stored heading matches the
+position-implied direction of travel to within ~0.1° for every vehicle in
+the sample trace. If you want to see the raw, unfixed annotation's heading
+error for yourself, run validation before fixing — the erratic values show
+up as `kinematic` / yaw-rate issues (jumps in the 15–180°/s range between
+frames), which is the same signal that flags this automatically.
 
 ## Known limitations / scope (v1)
 

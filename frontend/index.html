@@ -11,13 +11,22 @@
     <h1>Trace Fixer</h1>
     <div class="topbar-controls">
       <div class="trace-picker">
+        <button id="trace-prev" class="trace-nav-btn" title="Previous trace in the current list">&#9664;</button>
         <button id="trace-picker-btn" class="trace-picker-btn" title="Choose a trace">
           <span id="trace-picker-label">Loading&hellip;</span>
         </button>
+        <button id="trace-next" class="trace-nav-btn" title="Next trace in the current list">&#9654;</button>
         <div id="trace-picker-panel" class="trace-picker-panel hidden">
           <input id="trace-search" type="text" placeholder="Search traces by name&hellip;" autocomplete="off" />
           <div id="trace-listbox" class="trace-listbox"></div>
           <div id="trace-picker-footer" class="trace-picker-footer"></div>
+          <div class="batch-bar">
+            <span id="batch-selected-count">0 selected</span>
+            <button id="batch-select-shown" title="Select every trace currently shown in this list">Select shown</button>
+            <button id="batch-clear-selection" title="Clear selection">Clear</button>
+          </div>
+          <button id="batch-run" class="primary batch-run-btn" disabled>Fix + predict selected</button>
+          <p id="batch-status" class="scan-status"></p>
         </div>
       </div>
 

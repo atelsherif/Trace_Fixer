@@ -13,6 +13,9 @@ const state = {
   selectedVehicleId: null,
   showLanes: true,
   showStatic: false,
+  searchQuery: "",
+  selectedTraceIds: new Set(),
+  batchRunning: false,
 };
 
 const el = (id) => document.getElementById(id);
@@ -58,7 +61,12 @@ async function initTracePicker() {
   }
 }
 
+let lastListedIds = [];
+let lastListedTotal = 0;
+
 function renderTraceListbox(ids, total) {
+  lastListedIds = ids;
+  lastListedTotal = total;
   const box = el("trace-listbox");
   box.innerHTML = "";
   if (ids.length === 0) {
@@ -70,7 +78,24 @@ function renderTraceListbox(ids, total) {
   for (const id of ids) {
     const item = document.createElement("div");
     item.className = "trace-listbox-item" + (id === state.traceId ? " active" : "");
-    item.textContent = id;
+
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.className = "trace-listbox-checkbox";
+    checkbox.checked = state.selectedTraceIds.has(id);
+    checkbox.title = "Select for batch fix + predict";
+    checkbox.addEventListener("click", (e) => e.stopPropagation());
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) state.selectedTraceIds.add(id); else state.selectedTraceIds.delete(id);
+      updateBatchControl();
+    });
+
+    const name = document.createElement("span");
+    name.className = "trace-listbox-name";
+    name.textContent = id;
+
+    item.appendChild(checkbox);
+    item.appendChild(name);
     item.addEventListener("click", async () => {
       closeTracePicker();
       await loadTrace(id);
@@ -80,6 +105,12 @@ function renderTraceListbox(ids, total) {
   const shown = ids.length;
   el("trace-picker-footer").textContent =
     total > shown ? `Showing ${shown} of ${total} traces — keep typing to narrow down.` : `${total} trace(s) available.`;
+}
+
+function updateBatchControl() {
+  const n = state.selectedTraceIds.size;
+  el("batch-selected-count").textContent = `${n} selected`;
+  el("batch-run").disabled = n === 0 || state.batchRunning;
 }
 
 function openTracePicker() {
@@ -92,9 +123,10 @@ function closeTracePicker() {
 
 let traceSearchDebounce = null;
 function onTraceSearchInput(value) {
+  state.searchQuery = value.trim();
   clearTimeout(traceSearchDebounce);
   traceSearchDebounce = setTimeout(async () => {
-    const data = await queryTraces(value.trim());
+    const data = await queryTraces(state.searchQuery);
     renderTraceListbox(data.trace_ids, data.total);
   }, 150);
 }
@@ -107,6 +139,57 @@ async function loadTrace(traceId) {
   state.timeS = 0;
   state.camera.followEgo = true;
   setStatus(`Loaded ${traceId}: ${scene.vehicles.length} vehicles, ${scene.duration_s.toFixed(1)}s.`);
+}
+
+async function stepTrace(direction) {
+  if (!state.traceId) return;
+  const params = new URLSearchParams({ direction });
+  if (state.searchQuery) params.set("q", state.searchQuery);
+  try {
+    const data = await apiGet(`/api/traces/${state.traceId}/neighbor?${params.toString()}`);
+    if (data.trace_id !== state.traceId) await loadTrace(data.trace_id);
+  } catch (err) {
+    setStatus(`Could not navigate: ${err.message}`);
+  }
+}
+
+async function runBatch() {
+  const ids = Array.from(state.selectedTraceIds);
+  if (!ids.length || state.batchRunning) return;
+  state.batchRunning = true;
+  updateBatchControl();
+  const results = [];
+  for (let i = 0; i < ids.length; i++) {
+    const id = ids[i];
+    el("batch-status").textContent = `Fixing + predicting ${i + 1}/${ids.length}: ${id}…`;
+    try {
+      const r = await fetch(`/api/traces/${id}/batch_fix_predict`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ horizon_s: 4.0, step_s: 0.2 }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
+      results.push(data);
+    } catch (err) {
+      results.push({ trace_id: id, error: err.message });
+    }
+  }
+  state.batchRunning = false;
+  updateBatchControl();
+
+  const failed = results.filter((r) => r.error);
+  const ok = results.filter((r) => !r.error);
+  const totalBefore = ok.reduce((s, r) => s + r.before_issue_count, 0);
+  const totalAfter = ok.reduce((s, r) => s + r.after_issue_count, 0);
+  el("batch-status").textContent =
+    `Done: ${ok.length}/${ids.length} trace(s) processed, issues ${totalBefore} → ${totalAfter}.` +
+    (failed.length ? ` ${failed.length} failed: ${failed.map((f) => f.trace_id).join(", ")}` : "");
+  setStatus(el("batch-status").textContent);
+
+  if (state.traceId && state.selectedTraceIds.has(state.traceId)) {
+    await loadTrace(state.traceId); // refresh the currently displayed trace if it was included
+  }
 }
 
 function applyScene(scene) {
@@ -404,6 +487,21 @@ function wireControls() {
     const scan = document.querySelector(".scan-picker");
     if (scan && !scan.contains(e.target)) el("scan-panel").classList.add("hidden");
   });
+
+  el("trace-prev").addEventListener("click", () => stepTrace("prev"));
+  el("trace-next").addEventListener("click", () => stepTrace("next"));
+
+  el("batch-select-shown").addEventListener("click", () => {
+    for (const id of lastListedIds) state.selectedTraceIds.add(id);
+    renderTraceListbox(lastListedIds, lastListedTotal);
+    updateBatchControl();
+  });
+  el("batch-clear-selection").addEventListener("click", () => {
+    state.selectedTraceIds.clear();
+    renderTraceListbox(lastListedIds, lastListedTotal);
+    updateBatchControl();
+  });
+  el("batch-run").addEventListener("click", runBatch);
 
   // -- scan directory --
   el("scan-btn").addEventListener("click", () => {

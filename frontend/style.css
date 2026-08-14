@@ -56,6 +56,16 @@ body {
 
 .trace-picker, .scan-picker {
   position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.trace-nav-btn {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  padding: 0;
 }
 
 .trace-picker-btn {
@@ -110,10 +120,47 @@ body {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .trace-listbox-item:hover { background: #283040; }
 .trace-listbox-item.active { background: var(--accent-dim); color: white; }
+
+.trace-listbox-item .trace-listbox-checkbox {
+  flex: none;
+}
+
+.trace-listbox-item .trace-listbox-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.batch-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.batch-bar button {
+  flex: none;
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+.batch-run-btn {
+  width: 100%;
+  margin-top: 8px;
+}
+
+.batch-run-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 
 .trace-listbox-empty {
   padding: 10px 8px;
