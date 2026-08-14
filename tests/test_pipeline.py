@@ -62,17 +62,27 @@ def test_fix_engine_resolves_flagged_issues(trace):
     assert len(trace.issues) == 0
 
 
-def test_prediction_adds_prefix_for_mid_clip_vehicles(trace):
+def test_prediction_adds_prefix_and_suffix_for_mid_clip_vehicles(trace):
     from trace_fixer.prediction.extrapolate import predict_all
 
     added = predict_all(trace)
-    assert set(added.keys()) == {2, 4, 5}  # vehicles 1 and 3 are visible from frame 1
+    # vehicles 1 and 3 are visible from frame 1 -> no pre-FOV gap to predict
+    assert "backward" not in added[1] and "backward" not in added[3]
+    # none of the tracks run to the very end of the clip (frame ~1501) ->
+    # every vehicle has a post-FOV gap to predict
+    assert all("forward" in added[vid] for vid in added)
+    assert set(added.keys()) == {1, 2, 3, 4, 5}
+
     for track in trace.annotation.vehicles.values():
-        synthetic = [o for o in track.observations if o.synthetic]
         real = [o for o in track.observations if not o.synthetic]
-        if synthetic:
-            assert synthetic[-1].t_us < real[0].t_us
-            assert all(a.t_us < b.t_us for a, b in zip(track.observations, track.observations[1:]))
+        pre = [o for o in track.observations if o.synthetic and o.t_us < real[0].t_us]
+        post = [o for o in track.observations if o.synthetic and o.t_us > real[-1].t_us]
+        if pre:
+            assert pre[-1].t_us < real[0].t_us
+        if post:
+            assert post[0].t_us > real[-1].t_us
+        ts = [o.t_us for o in track.observations]
+        assert all(a < b for a, b in zip(ts, ts[1:]))
 
 
 def test_export_adma_round_trips_when_unmodified(trace, tmp_path):
@@ -98,7 +108,7 @@ def test_export_annotation_marks_predictions(trace, tmp_path):
     negative_frame_count = sum(
         1 for t in reparsed.vehicles.values() for o in t.observations if o.frame < 0
     )
-    assert negative_frame_count == 60  # 3 mid-clip vehicles * 20-step default horizon
+    assert negative_frame_count == 160  # 8 (vehicle, direction) pairs * 20-step default horizon
 
 
 def test_export_opendrive_and_openscenario_are_well_formed(trace):

@@ -49,7 +49,7 @@ class VehicleObs:
     x_m: float = 0.0
     y_m: float = 0.0
     heading_deg: float = 0.0
-    synthetic: bool = False  # True if produced by backward prediction, not original annotation
+    synthetic: bool = False  # True if produced by pre/post-FOV prediction, not original annotation
     fixed: bool = False  # True if position/heading were adjusted by the fix engine
 
 

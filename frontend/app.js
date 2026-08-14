@@ -395,11 +395,14 @@ function wireControls() {
   });
 
   el("btn-predict").addEventListener("click", async () => {
-    setStatus("Predicting pre-FOV trajectories…");
+    setStatus("Predicting trajectories before/after the sensor FOV…");
     const res = await apiPost(`/api/traces/${state.traceId}/predict`, { horizon_s: 4.0, step_s: 0.2 });
     applyScene(res.scene);
-    const n = Object.keys(res.added).length;
-    setStatus(n ? `Added predictions for ${n} vehicle(s).` : "No vehicles needed pre-FOV prediction.");
+    const perVehicle = Object.entries(res.added).map(([vid, dirs]) => {
+      const parts = Object.keys(dirs);
+      return `veh ${vid} (${parts.join(" + ")})`;
+    });
+    setStatus(perVehicle.length ? `Added predictions: ${perVehicle.join(", ")}.` : "No vehicles needed prediction.");
   });
 
   el("btn-clear-predict").addEventListener("click", async () => {

@@ -1,8 +1,8 @@
 """Writes a fixed/predicted annotation XML by surgically patching the
 *original* file's tree: only vehicle bounding-box coordinates that were
 actually changed are overwritten, dropped (trailing ego-collision trim)
-observations are removed, and predicted pre-FOV observations are inserted
-as new timestamp elements. Everything else in the file (lane markings,
+observations are removed, and predicted pre/post-FOV observations are
+inserted as new timestamp elements. Everything else in the file (lane markings,
 border polygons, static objects, scene metadata) is left byte-for-byte as
 authored by the annotation team, since only vehicle tracks are within this
 tool's fix/predict scope.

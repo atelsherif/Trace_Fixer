@@ -60,8 +60,8 @@ class EgoInterpolator:
     """Interpolates ego pose (position + yaw) at arbitrary times along an EgoTrace.
 
     Times outside the trace range are clamped to the nearest endpoint pose
-    (no extrapolation here -- backward prediction of *other vehicles* is a
-    separate, explicit feature in trace_fixer.prediction).
+    (no extrapolation here -- pre/post-FOV prediction of *other vehicles* is
+    a separate, explicit feature in trace_fixer.prediction).
     """
 
     def __init__(self, ego: EgoTrace):

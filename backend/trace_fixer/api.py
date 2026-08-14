@@ -84,12 +84,16 @@ def fix(trace_id: str):
 class PredictRequest(BaseModel):
     horizon_s: float = 4.0
     step_s: float = 0.2
+    backward: bool = True
+    forward: bool = True
 
 
 @app.post("/api/traces/{trace_id}/predict")
 def predict(trace_id: str, req: PredictRequest = PredictRequest()):
     trace = _get_trace_or_404(trace_id)
-    added = predict_all(trace, horizon_s=req.horizon_s, step_s=req.step_s)
+    added = predict_all(
+        trace, horizon_s=req.horizon_s, step_s=req.step_s, backward=req.backward, forward=req.forward
+    )
     run_validation(trace)
     return {"added": added, "scene": build_scene_json(trace)}
 

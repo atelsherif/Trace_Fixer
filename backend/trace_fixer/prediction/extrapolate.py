@@ -1,15 +1,20 @@
-"""Backward trajectory prediction for vehicles that are already moving when
-first observed -- i.e. they entered the Lidar's ~120deg front-bumper field
-of view already in motion, so their approach isn't in the annotation at all.
+"""Trajectory prediction for the parts of a vehicle's path the Lidar never
+saw: before it entered the ~120deg front-bumper field of view (already
+moving when first observed) and after it left it -- most commonly a vehicle
+the ego overtakes, or that overtakes the ego and pulls away, dropping out of
+the front-facing cone while still on the road.
 
-Model: constant-speed extrapolation from the vehicle's initial observed
-velocity, with heading gently steered toward the local road-tangent (taken
-from the ego path, which is a clean, continuous polyline covering the whole
-corridor) so the predicted approach curves with the road instead of running
-off it in a straight line. This is intentionally a simple, explainable model
--- there's no ground truth for what a vehicle did before it was ever
-observed, so the goal is "a plausible, road-following approach", not a
-precise reconstruction.
+Model (both directions): constant-speed extrapolation from the vehicle's
+observed velocity at the relevant end of its track, with heading gently
+steered toward the local road-tangent (taken from the ego path, a clean,
+continuous polyline covering the whole corridor) so the predicted segment
+curves with the road instead of running off it in a straight line. This is
+intentionally a simple, explainable model -- there's no ground truth for
+what a vehicle did while unobserved, so the goal is "a plausible,
+road-following continuation", not a precise reconstruction. Predictions are
+per-vehicle and don't reason about other traffic, so two independently
+predicted segments can end up overlapping; that's surfaced by validation
+rather than silently resolved.
 """
 from __future__ import annotations
 
@@ -22,7 +27,7 @@ from trace_fixer.models import EgoTrace, Trace, VehicleObs, VehicleTrack
 DEFAULT_HORIZON_S = 4.0
 DEFAULT_STEP_S = 0.2
 STEER_BLEND = 0.35  # how strongly heading is pulled toward the local road tangent per step
-MIN_FRAME_TO_PREDICT = 3  # tracks starting at/near frame 1 were visible from the recording start
+EDGE_FRAME_MARGIN = 3  # tracks within this many frames of the clip's start/end have nothing missing to predict
 
 
 def _wrap_rad(a: float) -> float:
@@ -46,51 +51,41 @@ def _nearest_path_tangent(ego: EgoTrace, x: float, y: float) -> float:
     return math.atan2(dy, dx)
 
 
-def predict_backward(
-    track: VehicleTrack,
+def _initial_speed_heading(anchor: VehicleObs, neighbor: VehicleObs) -> tuple[float, float]:
+    dt = (neighbor.t_us - anchor.t_us) / 1e6
+    vx = (neighbor.x_m - anchor.x_m) / dt if dt != 0 else 0.0
+    vy = (neighbor.y_m - anchor.y_m) / dt if dt != 0 else 0.0
+    speed = math.hypot(vx, vy)
+    heading = math.atan2(vy, vx) if speed > 0.1 else math.radians(anchor.heading_deg)
+    return speed, heading
+
+
+def _extrapolate(
+    anchor: VehicleObs,
     trace: Trace,
-    horizon_s: float = DEFAULT_HORIZON_S,
-    step_s: float = DEFAULT_STEP_S,
-) -> int:
-    """Prepends synthetic observations before the track's first real one.
-    Returns the number of synthetic observations added.
+    interp: EgoInterpolator,
+    speed: float,
+    heading: float,
+    direction: int,
+    horizon_s: float,
+    step_s: float,
+    time_bound_us: int,
+) -> list[VehicleObs]:
+    """Steps away from `anchor` in time by `direction` (+1 forward, -1
+    backward) for up to horizon_s, stopping at time_bound_us (the ego
+    trace's start/end). Returned list is in the order generated, i.e.
+    chronological for direction=+1 and reverse-chronological for -1.
     """
-    obs = track.observations
-    if not obs:
-        return 0
-    # Drop any previously-generated synthetic prefix before recomputing.
-    real_obs = [o for o in obs if not o.synthetic]
-    if not real_obs:
-        return 0
-    first = real_obs[0]
-    if first.frame <= MIN_FRAME_TO_PREDICT:
-        track.observations = real_obs
-        return 0
-
-    if len(real_obs) >= 2:
-        second = real_obs[1]
-        dt = (second.t_us - first.t_us) / 1e6
-        vx = (second.x_m - first.x_m) / dt if dt > 0 else 0.0
-        vy = (second.y_m - first.y_m) / dt if dt > 0 else 0.0
-        speed = math.hypot(vx, vy)
-        heading = math.atan2(vy, vx) if speed > 0.1 else math.radians(first.heading_deg)
-    else:
-        speed = 25.0  # fallback: typical highway speed, m/s
-        heading = math.radians(first.heading_deg)
-
-    interp = EgoInterpolator(trace.ego)
-    ego_t0 = trace.ego.t0_us
-    step_us = int(step_s * 1e6)
-
-    x, y = first.x_m, first.y_m
-    t_cursor = first.t_us - step_us
+    step_us = int(step_s * 1e6) * direction
+    x, y = anchor.x_m, anchor.y_m
+    t_cursor = anchor.t_us + step_us
     elapsed = 0.0
     synthetic: list[VehicleObs] = []
-    while elapsed < horizon_s and t_cursor > ego_t0:
+    while elapsed < horizon_s and (t_cursor < time_bound_us if direction > 0 else t_cursor > time_bound_us):
         tangent = _nearest_path_tangent(trace.ego, x, y)
         heading = heading + STEER_BLEND * _wrap_rad(tangent - heading)
-        x -= math.cos(heading) * speed * step_s
-        y -= math.sin(heading) * speed * step_s
+        x += direction * math.cos(heading) * speed * step_s
+        y += direction * math.sin(heading) * speed * step_s
 
         t_ego_us = apply_offset(t_cursor, trace.sync_offset_us)
         ex, ey, eyaw, _ = interp.at(t_ego_us)
@@ -101,15 +96,15 @@ def predict_backward(
             VehicleObs(
                 t_us=t_cursor,
                 frame=-1,
-                obj_movement=first.obj_movement,
-                obj_lane=first.obj_lane,
+                obj_movement=anchor.obj_movement,
+                obj_lane=anchor.obj_lane,
                 obj_confidence="Predicted",
                 x_rel=x_rel,
                 y_rel=y_rel,
-                z_rel=first.z_rel,
-                length=first.length,
-                width=first.width,
-                height=first.height,
+                z_rel=anchor.z_rel,
+                length=anchor.length,
+                width=anchor.width,
+                height=anchor.height,
                 zrot=zrot,
                 x_m=x,
                 y_m=y,
@@ -117,20 +112,103 @@ def predict_backward(
                 synthetic=True,
             )
         )
-        t_cursor -= step_us
+        t_cursor += step_us
         elapsed += step_s
 
+    return synthetic
+
+
+def _total_frames(trace: Trace) -> int | None:
+    if not trace.annotation.frame_meta:
+        return None
+    return max(m.frame for m in trace.annotation.frame_meta)
+
+
+def predict_backward(
+    track: VehicleTrack,
+    trace: Trace,
+    horizon_s: float = DEFAULT_HORIZON_S,
+    step_s: float = DEFAULT_STEP_S,
+) -> int:
+    """Prepends synthetic observations before the track's first real one
+    (pre-FOV: the vehicle was already moving when first observed). Returns
+    the number of synthetic observations added.
+    """
+    real_obs = [o for o in track.observations if not o.synthetic]
+    if not real_obs:
+        return 0
+    first = real_obs[0]
+    if first.frame <= EDGE_FRAME_MARGIN:
+        return 0
+
+    if len(real_obs) >= 2:
+        speed, heading = _initial_speed_heading(first, real_obs[1])
+    else:
+        speed, heading = 25.0, math.radians(first.heading_deg)  # fallback: typical highway speed
+
+    interp = EgoInterpolator(trace.ego)
+    synthetic = _extrapolate(
+        first, trace, interp, speed, heading, direction=-1,
+        horizon_s=horizon_s, step_s=step_s, time_bound_us=trace.ego.t0_us,
+    )
     synthetic.reverse()
-    track.observations = synthetic + real_obs
+    track.observations = synthetic + [o for o in track.observations if not (o.synthetic and o.t_us < first.t_us)]
     return len(synthetic)
 
 
-def predict_all(trace: Trace, horizon_s: float = DEFAULT_HORIZON_S, step_s: float = DEFAULT_STEP_S) -> dict[int, int]:
-    added = {}
+def predict_forward(
+    track: VehicleTrack,
+    trace: Trace,
+    horizon_s: float = DEFAULT_HORIZON_S,
+    step_s: float = DEFAULT_STEP_S,
+) -> int:
+    """Appends synthetic observations after the track's last real one
+    (post-FOV: the vehicle dropped out of the front-facing cone -- overtaken
+    by, or overtaking, the ego -- while presumably still on the road).
+    Returns the number of synthetic observations added.
+    """
+    real_obs = [o for o in track.observations if not o.synthetic]
+    if not real_obs:
+        return 0
+    last = real_obs[-1]
+    total_frames = _total_frames(trace)
+    if total_frames is not None and last.frame >= total_frames - EDGE_FRAME_MARGIN:
+        return 0
+
+    if len(real_obs) >= 2:
+        speed, heading = _initial_speed_heading(real_obs[-2], last)
+    else:
+        speed, heading = 25.0, math.radians(last.heading_deg)
+
+    interp = EgoInterpolator(trace.ego)
+    synthetic = _extrapolate(
+        last, trace, interp, speed, heading, direction=1,
+        horizon_s=horizon_s, step_s=step_s, time_bound_us=trace.ego.t1_us,
+    )
+    track.observations = [o for o in track.observations if not (o.synthetic and o.t_us > last.t_us)] + synthetic
+    return len(synthetic)
+
+
+def predict_all(
+    trace: Trace,
+    horizon_s: float = DEFAULT_HORIZON_S,
+    step_s: float = DEFAULT_STEP_S,
+    backward: bool = True,
+    forward: bool = True,
+) -> dict[int, dict[str, int]]:
+    added: dict[int, dict[str, int]] = {}
     for track in trace.annotation.vehicles.values():
-        n = predict_backward(track, trace, horizon_s=horizon_s, step_s=step_s)
-        if n:
-            added[track.obj_id] = n
+        entry = {}
+        if backward:
+            n = predict_backward(track, trace, horizon_s=horizon_s, step_s=step_s)
+            if n:
+                entry["backward"] = n
+        if forward:
+            n = predict_forward(track, trace, horizon_s=horizon_s, step_s=step_s)
+            if n:
+                entry["forward"] = n
+        if entry:
+            added[track.obj_id] = entry
     return added
 
 

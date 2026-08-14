@@ -40,11 +40,13 @@ python3 -m pytest
 2. **Run validation** to flag implausible vehicle motion, collisions, and
    off-road excursions in the issue list. Click an issue to jump the
    timeline to it and highlight the vehicle.
-3. **Predict pre-FOV** extrapolates a plausible approach path for any
-   vehicle that's already moving when first observed (i.e. it entered the
-   ~120° front-bumper Lidar cone already in motion). Predicted segments
-   render dashed/purple and are excluded from export unless you ask for
-   them (`include_predictions` on the annotation export).
+3. **Predict outside FOV** extrapolates a plausible path for any vehicle
+   before it entered the ~120° front-bumper Lidar cone (already moving when
+   first observed) *and* after it left the cone (most commonly the ego
+   overtaking it, or it overtaking the ego, while it's presumably still on
+   the road). Predicted segments render dashed/purple and are excluded from
+   export unless you ask for them (`include_predictions` on the annotation
+   export).
 4. **Apply fixes** smooths flagged vehicle tracks, clamps positions back
    inside the annotated road corridor, and drops trailing observations that
    still overlap the ego vehicle after smoothing (a common "lost the track
@@ -153,12 +155,11 @@ and explainable rules are what an annotation QA team can act on directly.
   from the ADMA trace. The reference line runs along the edge of the ego's
   lane rather than precisely through its center (a half-lane-width
   simplification).
-- **Backward prediction is per-vehicle**, using a constant-speed,
+- **Prediction is per-vehicle** (both directions), using a constant-speed,
   lane-tangent-following model. It doesn't reason about other traffic, so
   two independently-predicted vehicles can end up flagged as colliding —
-  that's a real signal ("these two tracks are ambiguous before they were
-  observed"), not a bug, and is left for manual review rather than
-  silently resolved.
+  that's a real signal ("these two tracks are ambiguous while unobserved"),
+  not a bug, and is left for manual review rather than silently resolved.
 - **Ego (ADMA) trace fixes are flag-only** in v1 (see table above).
 - Lane markings/road edges are stored in the annotation as sparse
   ego-relative keyframes (not one per frame); the GUI renders the union of
