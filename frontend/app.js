@@ -6,6 +6,7 @@ const state = {
   timeS: 0,
   playing: false,
   playbackSpeed: 1,
+  loop: false,
   lastFrameMs: null,
   camera: { zoom: 8, followEgo: true, centerX: 0, centerY: 0, headingUp: true },
   drag: null,
@@ -39,28 +40,68 @@ function setStatus(msg) {
   el("status-line").textContent = msg;
 }
 
-// ---------- Scene loading ----------
+// ---------- Trace picker (searchable, scales to large corpora) ----------
 
-async function refreshTraceList() {
-  const data = await apiGet("/api/traces");
-  const select = el("trace-select");
-  const prev = state.traceId;
-  select.innerHTML = "";
-  for (const id of data.trace_ids) {
-    const opt = document.createElement("option");
-    opt.value = id;
-    opt.textContent = id;
-    select.appendChild(opt);
+async function queryTraces(q) {
+  const params = new URLSearchParams({ limit: "200" });
+  if (q) params.set("q", q);
+  return apiGet(`/api/traces?${params.toString()}`);
+}
+
+async function initTracePicker() {
+  const data = await queryTraces("");
+  renderTraceListbox(data.trace_ids, data.total);
+  if (data.trace_ids.length > 0) {
+    await loadTrace(data.trace_ids[0]);
+  } else {
+    el("trace-picker-label").textContent = "No traces";
   }
-  if (data.trace_ids.length === 0) return;
-  const pick = prev && data.trace_ids.includes(prev) ? prev : data.trace_ids[0];
-  select.value = pick;
-  await loadTrace(pick);
+}
+
+function renderTraceListbox(ids, total) {
+  const box = el("trace-listbox");
+  box.innerHTML = "";
+  if (ids.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "trace-listbox-empty";
+    empty.textContent = "No matching traces.";
+    box.appendChild(empty);
+  }
+  for (const id of ids) {
+    const item = document.createElement("div");
+    item.className = "trace-listbox-item" + (id === state.traceId ? " active" : "");
+    item.textContent = id;
+    item.addEventListener("click", async () => {
+      closeTracePicker();
+      await loadTrace(id);
+    });
+    box.appendChild(item);
+  }
+  const shown = ids.length;
+  el("trace-picker-footer").textContent =
+    total > shown ? `Showing ${shown} of ${total} traces — keep typing to narrow down.` : `${total} trace(s) available.`;
+}
+
+function openTracePicker() {
+  el("trace-picker-panel").classList.remove("hidden");
+  el("trace-search").focus();
+}
+function closeTracePicker() {
+  el("trace-picker-panel").classList.add("hidden");
+}
+
+let traceSearchDebounce = null;
+function onTraceSearchInput(value) {
+  clearTimeout(traceSearchDebounce);
+  traceSearchDebounce = setTimeout(async () => {
+    const data = await queryTraces(value.trim());
+    renderTraceListbox(data.trace_ids, data.total);
+  }, 150);
 }
 
 async function loadTrace(traceId) {
   state.traceId = traceId;
-  el("trace-select").value = traceId;
+  el("trace-picker-label").textContent = traceId;
   const scene = await apiGet(`/api/traces/${traceId}/scene`);
   applyScene(scene);
   state.timeS = 0;
@@ -317,14 +358,26 @@ function setPlaying(playing) {
   state.lastFrameMs = null;
 }
 
+function stepTime(deltaS) {
+  if (!state.scene) return;
+  state.timeS = Math.max(0, Math.min(state.scene.duration_s, state.timeS + deltaS));
+  setPlaying(false);
+  updateTimeLabel();
+  draw();
+}
+
 function tick(nowMs) {
   if (state.playing && state.scene) {
     if (state.lastFrameMs != null) {
       const dt = (nowMs - state.lastFrameMs) / 1000;
       state.timeS += dt * state.playbackSpeed;
       if (state.timeS > state.scene.duration_s) {
-        state.timeS = state.scene.duration_s;
-        setPlaying(false);
+        if (state.loop) {
+          state.timeS = state.timeS % state.scene.duration_s;
+        } else {
+          state.timeS = state.scene.duration_s;
+          setPlaying(false);
+        }
       }
     }
     state.lastFrameMs = nowMs;
@@ -339,9 +392,47 @@ function tick(nowMs) {
 function wireControls() {
   window.addEventListener("resize", () => { resizeCanvas(); draw(); });
 
-  el("trace-select").addEventListener("change", (e) => loadTrace(e.target.value));
+  // -- trace picker --
+  el("trace-picker-btn").addEventListener("click", () => {
+    const panel = el("trace-picker-panel");
+    if (panel.classList.contains("hidden")) openTracePicker(); else closeTracePicker();
+  });
+  el("trace-search").addEventListener("input", (e) => onTraceSearchInput(e.target.value));
+  document.addEventListener("click", (e) => {
+    const picker = document.querySelector(".trace-picker");
+    if (picker && !picker.contains(e.target)) closeTracePicker();
+    const scan = document.querySelector(".scan-picker");
+    if (scan && !scan.contains(e.target)) el("scan-panel").classList.add("hidden");
+  });
 
+  // -- scan directory --
+  el("scan-btn").addEventListener("click", () => {
+    el("scan-panel").classList.toggle("hidden");
+    if (!el("scan-panel").classList.contains("hidden")) el("scan-path").focus();
+  });
+  el("scan-run").addEventListener("click", runScan);
+  el("scan-path").addEventListener("keydown", (e) => { if (e.key === "Enter") runScan(); });
+
+  // -- playback --
   el("play-pause").addEventListener("click", () => setPlaying(!state.playing));
+  el("restart").addEventListener("click", () => {
+    state.timeS = 0;
+    updateTimeLabel();
+    draw();
+    setPlaying(true);
+  });
+  el("step-back").addEventListener("click", () => stepTime(-1));
+  el("step-forward").addEventListener("click", () => stepTime(1));
+  el("loop-toggle").addEventListener("change", (e) => { state.loop = e.target.checked; });
+
+  window.addEventListener("keydown", (e) => {
+    const tag = (document.activeElement && document.activeElement.tagName) || "";
+    if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+    if (e.code === "Space") { e.preventDefault(); setPlaying(!state.playing); }
+    else if (e.code === "ArrowLeft") { e.preventDefault(); stepTime(-1); }
+    else if (e.code === "ArrowRight") { e.preventDefault(); stepTime(1); }
+    else if (e.code === "Home") { e.preventDefault(); state.timeS = 0; setPlaying(false); updateTimeLabel(); draw(); }
+  });
 
   el("timeline").addEventListener("input", (e) => {
     state.timeS = parseFloat(e.target.value);
@@ -445,6 +536,12 @@ function wireControls() {
   el("export-scenario").addEventListener("click", () => {
     window.location.href = `/api/traces/${state.traceId}/export/scenario`;
   });
+  el("export-report-txt").addEventListener("click", () => {
+    window.location.href = `/api/traces/${state.traceId}/export/report?format=txt`;
+  });
+  el("export-report-xml").addEventListener("click", () => {
+    window.location.href = `/api/traces/${state.traceId}/export/report?format=xml`;
+  });
 
   el("upload-btn").addEventListener("click", () => el("upload-adma").click());
   el("upload-adma").addEventListener("change", () => {
@@ -462,15 +559,39 @@ function wireControls() {
     const r = await fetch("/api/traces", { method: "POST", body: form });
     if (!r.ok) { setStatus("Upload failed."); return; }
     const data = await r.json();
-    await refreshTraceList();
     await loadTrace(data.trace_id);
   });
+}
+
+async function runScan() {
+  const path = el("scan-path").value.trim();
+  if (!path) return;
+  el("scan-status").textContent = "Scanning… this can take a moment for large corpora.";
+  try {
+    const r = await fetch("/api/traces/scan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      el("scan-status").textContent = `Scan failed: ${data.detail || r.status}`;
+      return;
+    }
+    el("scan-status").textContent =
+      `Found ${data.adma_found} ADMA file(s), ${data.xml_found} annotation file(s) — ` +
+      `matched ${data.matched} pair(s). ${data.total_traces} trace(s) now available.`;
+    const listing = await queryTraces("");
+    renderTraceListbox(listing.trace_ids, listing.total);
+  } catch (err) {
+    el("scan-status").textContent = `Scan failed: ${err.message}`;
+  }
 }
 
 async function init() {
   resizeCanvas();
   wireControls();
-  await refreshTraceList();
+  await initTracePicker();
   requestAnimationFrame(tick);
 }
 

@@ -24,9 +24,18 @@ PYTHONPATH=backend python3 -m trace_fixer.main   # serves on http://localhost:80
 ```
 
 Open `http://localhost:8000` in a browser. A sample trace (`sample1`) is
-bundled under `data/traces/sample1/` and loads automatically. Use "Upload
-trace…" in the top bar to add another ADMA CSV + annotation XML pair (each
-upload gets its own `data/traces/<id>/` directory).
+bundled under `data/traces/sample1/` and loads automatically. Add more
+traces either by:
+
+- **Upload trace…** in the top bar — for one-off pairs; each upload gets its
+  own `data/traces/<id>/` directory (copied onto the server).
+- **Scan directory…** in the top bar — for a whole corpus at once. Give it a
+  path *on the machine running the server* (this is a local tool: the
+  browser and server are assumed to be operated by the same person) and it
+  recursively finds every `adma.csv` and matches it to its annotation XML by
+  trace name, registering thousands of traces in well under a second
+  without copying any of it — each trace is only actually parsed the moment
+  you open it. See *Bulk directory scanning* below for the expected layout.
 
 Run the test suite with:
 
@@ -36,7 +45,10 @@ python3 -m pytest
 
 ## Using the GUI
 
-1. **Pick a trace** from the dropdown (or upload a new pair).
+1. **Pick a trace** from the trace picker (top bar) — it's a searchable
+   list, not a plain dropdown, so it stays usable with a corpus of
+   thousands (type to filter; it queries the server rather than holding
+   every trace client-side).
 2. **Run validation** to flag implausible vehicle motion, collisions, and
    off-road excursions in the issue list. Click an issue to jump the
    timeline to it and highlight the vehicle.
@@ -54,11 +66,39 @@ python3 -m pytest
    to see what's left.
 5. **Sync offset** nudges the annotation clock against the ADMA clock (see
    *Time alignment* below) — drag while watching the replay.
-6. **Export** the fixed ADMA CSV, fixed annotation XML, or an
-   OpenDRIVE + OpenSCENARIO `.zip` for simulation.
+6. **Export** the fixed ADMA CSV, fixed annotation XML, an
+   OpenDRIVE + OpenSCENARIO `.zip`, or a **problem report** (`.txt` or
+   `.xml`) listing every flagged issue — category, severity, vehicle,
+   time range, description, fixed/open — for an annotation QA team to
+   triage without opening the XML.
 
 "Reset trace" reloads the original files from disk, discarding all fixes/
 predictions/offset changes made in the session.
+
+### Playback controls
+
+Restart/replay (⏮), step back/forward 1s, play/pause, a loop toggle, and a
+speed selector, all in the timeline bar. Keyboard shortcuts (ignored while
+typing in a text field): **Space** play/pause, **←/→** step back/forward 1s,
+**Home** jump to the start.
+
+### Bulk directory scanning
+
+`Scan directory…` expects (and tolerates minor structural variation on) a
+layout like:
+
+```
+<root>/adma/ADMA/<trace_name>/adma.csv
+<root>/annotations/Annotations/<trace_name>__ref-QC_IND.xml
+```
+
+Every `adma.csv` file's trace name is its parent directory's name; every
+`*.xml` file is matched to a trace name by stripping known annotation-suffix
+patterns (`__refQC_IND`, `__ref-QC_IND`, case-insensitive) and falling back
+to a longest-prefix match for anything else. Unmatched files on either side
+are reported in the scan summary rather than silently dropped. Scanned
+traces are registered *by reference* — nothing is copied or parsed until you
+actually open one, so scanning ~20,000 files takes well under a second.
 
 ## Architecture
 
@@ -86,8 +126,13 @@ backend/trace_fixer/
                                (only touches what was fixed/predicted)
   export/opendrive.py         minimal piecewise-linear OpenDRIVE road
   export/openscenario.py      OpenSCENARIO FollowTrajectoryAction replay
+  export/report.py            problem-report export (txt / xml)
+  scan.py                     bulk directory walk + ADMA<->annotation
+                               filename matching, for large corpora
   scene.py                    ties it together into one JSON payload
-  store.py                    in-memory trace registry (data/traces/<id>/)
+  store.py                    trace registry: data/traces/<id>/ (copied,
+                               from uploads) plus by-reference entries
+                               (from directory scans)
   api.py                      FastAPI app + REST endpoints
 frontend/                     vanilla JS + canvas 2D top-down viewer
                                (no build step)

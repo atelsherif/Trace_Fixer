@@ -14,6 +14,7 @@ from trace_fixer.export.adma_writer import write_adma_csv
 from trace_fixer.export.annotation_writer import write_annotation_xml
 from trace_fixer.export.opendrive import generate_opendrive
 from trace_fixer.export.openscenario import generate_openscenario
+from trace_fixer.export.report import generate_txt_report, generate_xml_report
 from trace_fixer.geo.populate import populate_global_coords
 from trace_fixer.prediction.extrapolate import clear_predictions, predict_all
 from trace_fixer.scene import build_scene_json
@@ -37,8 +38,8 @@ def _get_trace_or_404(trace_id: str):
 
 
 @app.get("/api/traces")
-def list_traces():
-    return {"trace_ids": store.list_ids()}
+def list_traces(q: str | None = None, limit: int = 200):
+    return {"trace_ids": store.list_ids(query=q, limit=limit), "total": store.count()}
 
 
 class UploadResponse(BaseModel):
@@ -57,6 +58,35 @@ async def upload_trace(
         raise HTTPException(status_code=400, detail="Both files must be non-empty")
     trace_id = store.add_from_bytes(name or adma_file.filename or "trace", adma_bytes, annotation_bytes)
     return UploadResponse(trace_id=trace_id)
+
+
+class ScanRequest(BaseModel):
+    path: str
+
+
+class ScanResponse(BaseModel):
+    adma_found: int
+    xml_found: int
+    matched: int
+    unmatched_adma_count: int
+    unmatched_xml_count: int
+    total_traces: int
+
+
+@app.post("/api/traces/scan", response_model=ScanResponse)
+def scan_directory(req: ScanRequest):
+    root = Path(req.path).expanduser()
+    if not root.is_dir():
+        raise HTTPException(status_code=400, detail=f"Not a directory (on the server running this app): {root}")
+    result = store.scan_directory(root)
+    return ScanResponse(
+        adma_found=result.adma_found,
+        xml_found=result.xml_found,
+        matched=len(result.matched),
+        unmatched_adma_count=result.unmatched_adma_count,
+        unmatched_xml_count=result.unmatched_xml_count,
+        total_traces=store.count(),
+    )
 
 
 @app.get("/api/traces/{trace_id}/scene")
@@ -177,6 +207,24 @@ def export_scenario(trace_id: str):
         buf,
         media_type="application/zip",
         headers={"Content-Disposition": f'attachment; filename="{trace_id}_scenario.zip"'},
+    )
+
+
+@app.get("/api/traces/{trace_id}/export/report")
+def export_report(trace_id: str, format: str = "txt"):
+    trace = _get_trace_or_404(trace_id)
+    if format == "xml":
+        content = generate_xml_report(trace)
+        media_type, ext = "application/xml", "xml"
+    elif format == "txt":
+        content = generate_txt_report(trace)
+        media_type, ext = "text/plain", "txt"
+    else:
+        raise HTTPException(status_code=400, detail="format must be 'txt' or 'xml'")
+    return PlainTextResponse(
+        content,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{trace_id}_problem_report.{ext}"'},
     )
 
 

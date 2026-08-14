@@ -51,6 +51,96 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
+  position: relative;
+}
+
+.trace-picker, .scan-picker {
+  position: relative;
+}
+
+.trace-picker-btn {
+  min-width: 160px;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.trace-picker-btn::after {
+  content: "▾";
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.trace-picker-panel, .scan-panel {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  width: 340px;
+  background: var(--panel-bg-alt);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+  z-index: 20;
+}
+
+.trace-picker-panel.hidden, .scan-panel.hidden {
+  display: none;
+}
+
+.trace-picker-panel input[type="text"],
+.scan-panel input[type="text"] {
+  width: 100%;
+  margin-bottom: 8px;
+}
+
+.trace-listbox {
+  max-height: 280px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+
+.trace-listbox-item {
+  padding: 6px 8px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.trace-listbox-item:hover { background: #283040; }
+.trace-listbox-item.active { background: var(--accent-dim); color: white; }
+
+.trace-listbox-empty {
+  padding: 10px 8px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.trace-picker-footer {
+  margin-top: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.scan-panel {
+  width: 380px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.scan-panel input[type="text"] { flex: 1 1 100%; margin-bottom: 0; }
+.scan-panel button { flex: none; }
+.scan-status {
+  flex: 1 1 100%;
+  margin: 4px 0 0 0;
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: pre-wrap;
 }
 
 .layout {
@@ -265,11 +355,14 @@ select, input[type="text"] {
   border-top: 1px solid var(--border);
 }
 
-#play-pause {
+#restart, #step-back, #play-pause, #step-forward {
   flex: none;
   width: 34px;
   height: 34px;
+  padding: 0;
 }
+
+#play-pause { width: 40px; }
 
 #timeline { flex: 1; }
 

@@ -1,7 +1,17 @@
-"""In-memory registry of loaded traces, backed by a data/traces/<id>/ dir
-layout (adma.csv + annotation.xml per trace). Small single-user tool scope:
-no database, just parse-once-cache-in-memory with mutation in place (fixes/
-predictions/sync-offset all mutate the cached Trace object).
+"""In-memory registry of loaded traces.
+
+Two ways a trace becomes known to the store:
+  - Copied in: data/traces/<id>/adma.csv + annotation.xml (uploads land here).
+  - Registered by reference: an (adma_path, annotation_path) pair pointing
+    anywhere on disk, added via `register_external` / `scan_directory` --
+    used for bulk corpora (tens of thousands of traces) where copying
+    everything into data/traces/ would be wasteful. Nothing is read until
+    a trace is actually opened (`get`), so scanning a big directory is
+    just a filename walk, not a parse-everything operation.
+
+Small single-user tool scope: no database, just parse-once-cache-in-memory
+with mutation in place (fixes/predictions/sync-offset all mutate the cached
+Trace object).
 """
 from __future__ import annotations
 
@@ -11,6 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from trace_fixer.models import Trace
+from trace_fixer.scan import ScanResult, scan_for_trace_pairs
 from trace_fixer.scene import load_trace
 
 ADMA_FILENAME = "adma.csv"
@@ -29,18 +40,36 @@ def slugify(name: str) -> str:
 class TraceStore:
     traces_dir: Path
     _cache: dict[str, Trace] = field(default_factory=dict)
+    _external: dict[str, tuple[Path, Path]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.traces_dir.mkdir(parents=True, exist_ok=True)
 
-    def list_ids(self) -> list[str]:
-        ids = set(self._cache.keys())
+    def _folder_ids(self) -> set[str]:
+        ids = set()
         for child in self.traces_dir.iterdir():
             if child.is_dir() and (child / ADMA_FILENAME).exists() and (child / ANNOTATION_FILENAME).exists():
                 ids.add(child.name)
-        return sorted(ids)
+        return ids
+
+    def all_ids(self) -> set[str]:
+        return self._folder_ids() | set(self._external.keys())
+
+    def count(self) -> int:
+        return len(self.all_ids())
+
+    def list_ids(self, query: str | None = None, limit: int | None = None) -> list[str]:
+        ids = sorted(self.all_ids(), key=str.lower)
+        if query:
+            q = query.lower()
+            ids = [i for i in ids if q in i.lower()]
+        if limit is not None:
+            ids = ids[:limit]
+        return ids
 
     def _paths(self, trace_id: str) -> tuple[Path, Path]:
+        if trace_id in self._external:
+            return self._external[trace_id]
         d = self.traces_dir / trace_id
         return d / ADMA_FILENAME, d / ANNOTATION_FILENAME
 
@@ -66,7 +95,8 @@ class TraceStore:
         trace_id = slugify(name_hint)
         base_id = trace_id
         n = 1
-        while (self.traces_dir / trace_id).exists():
+        existing = self.all_ids()
+        while trace_id in existing:
             n += 1
             trace_id = f"{base_id}-{n}"
         d = self.traces_dir / trace_id
@@ -74,3 +104,12 @@ class TraceStore:
         (d / ADMA_FILENAME).write_bytes(adma_bytes)
         (d / ANNOTATION_FILENAME).write_bytes(annotation_bytes)
         return trace_id
+
+    def register_external(self, trace_id: str, adma_path: Path, annotation_path: Path) -> None:
+        self._external.setdefault(trace_id, (adma_path, annotation_path))
+
+    def scan_directory(self, root: Path) -> ScanResult:
+        result = scan_for_trace_pairs(root)
+        for trace_id, (adma_path, annotation_path) in result.matched.items():
+            self.register_external(trace_id, adma_path, annotation_path)
+        return result
