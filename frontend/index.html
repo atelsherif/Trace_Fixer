@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Trace Fixer</title>
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>Trace Fixer</h1>
+    <div class="topbar-controls">
+      <label class="field">
+        Trace
+        <select id="trace-select"></select>
+      </label>
+      <button id="upload-btn" title="Upload a new ADMA + annotation pair">Upload trace&hellip;</button>
+      <input id="upload-adma" type="file" accept=".csv" hidden />
+      <input id="upload-annotation" type="file" accept=".xml" hidden />
+    </div>
+  </header>
+
+  <main class="layout">
+    <section class="viewport-panel">
+      <canvas id="viewport"></canvas>
+      <div class="viewport-overlay">
+        <div class="viewport-controls">
+          <button id="zoom-in" title="Zoom in">+</button>
+          <button id="zoom-out" title="Zoom out">&minus;</button>
+          <button id="recenter" title="Recenter on ego">&#8853;</button>
+          <label class="checkbox-field"><input id="heading-up" type="checkbox" checked /> Lock heading up</label>
+          <label class="checkbox-field"><input id="show-lanes" type="checkbox" checked /> Lanes</label>
+          <label class="checkbox-field"><input id="show-static" type="checkbox" /> Static objects</label>
+        </div>
+        <div class="legend">
+          <span><i class="swatch ego"></i>Ego</span>
+          <span><i class="swatch vehicle"></i>Vehicle</span>
+          <span><i class="swatch predicted"></i>Predicted</span>
+          <span><i class="swatch flagged"></i>Flagged</span>
+        </div>
+      </div>
+    </section>
+
+    <aside class="side-panel">
+      <div class="panel-block">
+        <h2>Pipeline</h2>
+        <div class="button-row">
+          <button id="btn-validate">Run validation</button>
+          <button id="btn-predict">Predict pre-FOV</button>
+          <button id="btn-clear-predict">Clear predictions</button>
+        </div>
+        <div class="button-row">
+          <button id="btn-fix" class="primary">Apply fixes</button>
+          <button id="btn-reset">Reset trace</button>
+        </div>
+        <div class="field sync-field">
+          Sync offset (ms)
+          <input id="sync-offset" type="range" min="-2000" max="2000" step="10" value="0" />
+          <span id="sync-offset-value">0</span>
+        </div>
+        <p id="status-line" class="status-line"></p>
+      </div>
+
+      <div class="panel-block issues-block">
+        <h2>Issues <span id="issue-count" class="badge">0</span></h2>
+        <ul id="issue-list" class="issue-list"></ul>
+      </div>
+
+      <div class="panel-block">
+        <h2>Export</h2>
+        <div class="button-row">
+          <button id="export-adma">ADMA CSV</button>
+          <button id="export-annotation">Annotation XML</button>
+        </div>
+        <div class="button-row">
+          <button id="export-scenario">OpenSCENARIO/OpenDRIVE (.zip)</button>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <footer class="timeline-bar">
+    <button id="play-pause">&#9654;</button>
+    <input id="timeline" type="range" min="0" max="1" step="0.001" value="0" />
+    <span id="time-label">0.00 / 0.00 s</span>
+    <label class="field speed-field">
+      Speed
+      <select id="playback-speed">
+        <option value="0.25">0.25x</option>
+        <option value="0.5">0.5x</option>
+        <option value="1" selected>1x</option>
+        <option value="2">2x</option>
+        <option value="4">4x</option>
+      </select>
+    </label>
+  </footer>
+
+  <script src="app.js"></script>
+</body>
+</html>
