@@ -1,11 +1,20 @@
-"""Regression tests for the vehicle zrot degrees-vs-radians auto-detection.
+"""Regression tests for vehicle zrot's unit (always degrees in the raw
+file, normalized to radians on parse).
 
-Background: sample1's annotation export (structurefile minorversion 8)
-encodes vehicle zrot in radians. Other exports (minorversion 7, e.g.
-sample2 here) encode it in degrees instead, with no explicit unit field --
-misreading one as the other produces vehicles that appear to spin/rotate
-wildly or point perpendicular to their direction of travel, which is
-exactly the bug report this fixture set was built to catch and pin down.
+Background: originally believed to vary by export (sample1 "radians",
+sample2 "degrees") based on a magnitude-only heuristic -- flag as degrees
+when a raw value exceeds +/-pi, since that's impossible for a properly
+bounded relative heading as radians. That heuristic is necessary but not
+sufficient: it correctly caught sample2 (and every other export tested),
+but *missed* sample1, whose raw values happened to stay under pi by
+coincidence despite also being degrees. Cross-checking decoded heading
+against each vehicle's own position-implied direction of travel (from
+position deltas, independent of zrot) against ADMA ground truth proved it:
+misread as radians, sample1's mean heading error is 19.9 deg (consistent
+with a near-random unit mismatch); correctly read as degrees, it drops to
+0.5 deg. No confirmed radians file has been found across every export
+tested, so the unit is now treated as always degrees (see
+parsers.annotation_xml.detect_vehicle_zrot_unit).
 """
 import math
 from pathlib import Path
@@ -38,36 +47,65 @@ def _mean_heading_error(trace) -> float:
     return sum(diffs) / len(diffs)
 
 
-def test_detect_unit_radians_for_sample1():
+def _heading_error_forcing_unit(sample_dir: Path, unit: str) -> float:
+    """Builds a trace with vehicle zrot forced to the given unit ("rad" =
+    raw file value used as-is, "deg" = converted via math.radians), for
+    comparing hypotheses against ADMA ground truth without going through
+    the real auto-detected parse path.
+    """
+    import xml.etree.ElementTree as ET
+
+    from trace_fixer.geo.populate import populate_global_coords
+    from trace_fixer.models import Annotation, Trace
+    from trace_fixer.parsers.adma_csv import parse_adma_csv
+    from trace_fixer.parsers.annotation_xml import _parse_vehicles
+
+    ego = parse_adma_csv(sample_dir / "adma.csv")
+    root = ET.parse(sample_dir / "annotation.xml").getroot()
+    vehicles = _parse_vehicles(root)  # raw zrot, not unit-converted
+    if unit == "deg":
+        for track in vehicles.values():
+            for obs in track.observations:
+                obs.zrot = math.radians(obs.zrot)
+    trace = Trace(
+        trace_id=f"{sample_dir.name}-forced-{unit}",
+        ego=ego,
+        annotation=Annotation(country_code=None, vehicles=vehicles, vehicle_zrot_unit=unit),
+    )
+    populate_global_coords(trace)
+    return _mean_heading_error(trace)
+
+
+def test_detect_unit_is_always_degrees():
+    from trace_fixer.parsers.annotation_xml import detect_vehicle_zrot_unit
+
+    assert detect_vehicle_zrot_unit({}) == "deg"
+
+
+def test_sample1_and_sample2_both_parse_as_degrees():
     from trace_fixer.parsers.annotation_xml import parse_annotation_xml
 
-    ann = parse_annotation_xml(SAMPLE1_DIR / "annotation.xml")
-    assert ann.vehicle_zrot_unit == "rad"
-    max_abs = max(abs(o.zrot) for t in ann.vehicles.values() for o in t.observations)
-    assert max_abs <= math.pi
+    for sample_dir in (SAMPLE1_DIR, SAMPLE2_DIR):
+        ann = parse_annotation_xml(sample_dir / "annotation.xml")
+        assert ann.vehicle_zrot_unit == "deg"
+        max_abs = max(abs(o.zrot) for t in ann.vehicles.values() for o in t.observations)
+        assert max_abs <= math.pi + 0.01  # normalized values must be plausible radians
 
 
-def test_detect_unit_degrees_for_sample2():
-    from trace_fixer.parsers.annotation_xml import parse_annotation_xml
-
-    ann = parse_annotation_xml(SAMPLE2_DIR / "annotation.xml")
-    assert ann.vehicle_zrot_unit == "deg"
-    # after normalization, values must still be plausible radians
-    max_abs = max(abs(o.zrot) for t in ann.vehicles.values() for o in t.observations)
-    assert max_abs <= math.pi + 0.01
-
-
-def test_detect_unit_degrees_for_second_degrees_fixture():
+def test_degrees_fixture_still_flags_correctly():
     from trace_fixer.parsers.annotation_xml import parse_annotation_xml
 
     ann = parse_annotation_xml(FIXTURES_DIR / "annotation_degrees_046.xml")
     assert ann.vehicle_zrot_unit == "deg"
 
 
-def test_raw_degrees_values_would_be_implausible_as_radians():
-    """Sanity-checks the premise of the heuristic against the raw file: the
-    unconverted zrot text values exceed pi, which cannot be a legitimate
-    bounded relative-heading radian value.
+def test_raw_sample2_values_would_be_implausible_as_radians():
+    """Sanity-checks the premise of the (retired) magnitude heuristic
+    against sample2's raw file: some unconverted zrot text values exceed
+    pi, which cannot be a legitimate bounded relative-heading radian value.
+    Kept as a red flag in case anyone is ever tempted to bring the
+    magnitude-only heuristic back as the *sole* signal -- it's still true
+    for sample2, but was never sufficient (see the sample1 tests below).
     """
     import xml.etree.ElementTree as ET
 
@@ -76,18 +114,48 @@ def test_raw_degrees_values_would_be_implausible_as_radians():
     assert max(abs(z) for z in zrots) > math.pi
 
 
-def test_sample1_heading_error_before_fixing_is_bounded():
-    """sample1's raw zrot is genuinely noisy before fixing (that's what the
-    fix engine is for -- see the "held stale keyframe" finding in the
-    README), but it should still be bounded to a plausible annotation-noise
-    range, not the ~90 degree (effectively random) error a unit mismatch
-    would cause.
+def test_sample1_degrees_fits_far_better_than_radians():
+    """The key regression guard for the original miss: sample1's raw zrot
+    values are all individually small enough to *look* radian-plausible
+    (max ~2.8, under pi), which is exactly why the old magnitude-only
+    heuristic missed it. Comparing both hypotheses against ADMA ground
+    truth settles it unambiguously.
     """
+    rad_error = _heading_error_forcing_unit(SAMPLE1_DIR, "rad")
+    deg_error = _heading_error_forcing_unit(SAMPLE1_DIR, "deg")
+    assert deg_error < 1.0
+    assert rad_error > 15.0
+    assert rad_error > deg_error + 15.0
+
+
+def test_sample2_degrees_fits_far_better_than_radians():
+    """Same guard, for the file that was already correctly detected --
+    confirms the comparison methodology itself is sound (matches the
+    already-verified sample2 behavior)."""
+    rad_error = _heading_error_forcing_unit(SAMPLE2_DIR, "rad")
+    deg_error = _heading_error_forcing_unit(SAMPLE2_DIR, "deg")
+    assert deg_error < 15.0
+    assert rad_error > 60.0
+    assert rad_error > deg_error + 40.0
+
+
+def test_sample1_heading_matches_travel_direction_before_fixing():
     from trace_fixer.scene import load_trace
 
     trace = load_trace("sample1", SAMPLE1_DIR / "adma.csv", SAMPLE1_DIR / "annotation.xml")
-    error = _mean_heading_error(trace)
-    assert 0 < error < 30.0
+    assert trace.annotation.vehicle_zrot_unit == "deg"
+    assert _mean_heading_error(trace) < 1.0
+
+
+def test_sample1_is_issue_free_once_correctly_parsed():
+    """Confirms the practical consequence: sample1's previously-flagged
+    yaw-rate issues were an artifact of the unit bug, not real annotation
+    noise -- with degrees, validation finds nothing to flag."""
+    from trace_fixer.scene import load_trace
+    from trace_fixer.validation.checks import run_validation
+
+    trace = load_trace("sample1", SAMPLE1_DIR / "adma.csv", SAMPLE1_DIR / "annotation.xml")
+    assert run_validation(trace) == []
 
 
 def test_sample2_heading_matches_travel_direction_before_fixing():
@@ -96,43 +164,6 @@ def test_sample2_heading_matches_travel_direction_before_fixing():
     trace = load_trace("sample2", SAMPLE2_DIR / "adma.csv", SAMPLE2_DIR / "annotation.xml")
     assert trace.annotation.vehicle_zrot_unit == "deg"
     assert _mean_heading_error(trace) < 15.0
-
-
-def test_misinterpreting_sample2_as_radians_would_be_far_worse():
-    """The key regression guard: if sample2's zrot were (incorrectly, as
-    before this fix) treated as radians instead of degrees, the resulting
-    heading error would be close to random (tens of degrees worse) rather
-    than tracking the vehicles' actual direction of travel. This pins down
-    *why* auto-detection matters, not just that it fires.
-    """
-    from trace_fixer.geo.populate import populate_global_coords
-    from trace_fixer.models import Trace
-    from trace_fixer.parsers.adma_csv import parse_adma_csv
-    from trace_fixer.parsers.annotation_xml import _parse_vehicles
-    import xml.etree.ElementTree as ET
-
-    ego = parse_adma_csv(SAMPLE2_DIR / "adma.csv")
-    root = ET.parse(SAMPLE2_DIR / "annotation.xml").getroot()
-    vehicles_as_radians = _parse_vehicles(root)  # raw zrot, deliberately NOT unit-converted
-
-    from trace_fixer.models import Annotation
-
-    broken_trace = Trace(
-        trace_id="sample2-forced-radians",
-        ego=ego,
-        annotation=Annotation(country_code=None, vehicles=vehicles_as_radians, vehicle_zrot_unit="rad"),
-    )
-    populate_global_coords(broken_trace)
-    broken_error = _mean_heading_error(broken_trace)
-
-    from trace_fixer.scene import load_trace
-
-    correct_trace = load_trace("sample2", SAMPLE2_DIR / "adma.csv", SAMPLE2_DIR / "annotation.xml")
-    correct_error = _mean_heading_error(correct_trace)
-
-    assert correct_error < 15.0
-    assert broken_error > 60.0
-    assert broken_error > correct_error + 40.0
 
 
 def test_sample2_fix_engine_brings_heading_close_to_travel_direction():

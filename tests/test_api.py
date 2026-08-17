@@ -85,7 +85,7 @@ def test_batch_fix_predict_runs_full_pipeline(client_with_corpus):
     assert r.status_code == 200
     data = r.json()
     assert data["trace_id"] == names[0]
-    assert data["before_issue_count"] > 0  # the sample trace has known issues before fixing
+    assert data["before_issue_count"] == 0  # this corpus is copies of sample1, which is issue-free pre-fix
     assert len(data["fix_summary"]) == 5  # one line per vehicle in the sample trace
     assert set(data["predicted"].keys()) == {"1", "2", "3", "4", "5"}
 
@@ -115,25 +115,37 @@ def test_batch_fix_predict_404_for_unknown_trace(client_with_corpus):
     assert r.status_code == 404
 
 
-def test_individual_export_endpoints_also_write_to_output(client_with_corpus):
+def test_individual_export_endpoints_write_to_output_and_report_the_path(client_with_corpus):
+    """Every per-trace export endpoint writes into output/ and reports where
+    via JSON -- it never streams the file back for a browser download."""
     client, names, output_dir = client_with_corpus
     trace_id = names[0]
 
     r = client.get(f"/api/traces/{trace_id}/export/adma")
     assert r.status_code == 200
-    assert (output_dir / "adma" / "ADMA" / trace_id / "adma.csv").exists()
+    adma_path = output_dir / "adma" / "ADMA" / trace_id / "adma.csv"
+    assert adma_path.exists()
+    assert r.json()["output_path"] == str(adma_path)
+    assert "attachment" not in r.headers.get("content-disposition", "")
 
     r = client.get(f"/api/traces/{trace_id}/export/annotation")
     assert r.status_code == 200
     assert any((output_dir / "annotations" / "Annotations").glob(f"{trace_id}*"))
+    assert Path(r.json()["output_path"]).exists()
 
     r = client.get(f"/api/traces/{trace_id}/export/scenario")
     assert r.status_code == 200
-    assert (output_dir / "scenarios" / trace_id / f"{trace_id}.xodr").exists()
-    assert (output_dir / "scenarios" / trace_id / f"{trace_id}.xosc").exists()
+    xodr_path = output_dir / "scenarios" / trace_id / f"{trace_id}.xodr"
+    xosc_path = output_dir / "scenarios" / trace_id / f"{trace_id}.xosc"
+    assert xodr_path.exists()
+    assert xosc_path.exists()
+    data = r.json()
+    assert data["output_path"] == str(xodr_path.parent)
+    assert set(data["files"]) == {str(xodr_path), str(xosc_path)}
 
     r = client.get(f"/api/traces/{trace_id}/export/report", params={"format": "xml"})
     assert r.status_code == 200
     report_path = output_dir / "reports" / trace_id / f"{trace_id}_summary.xml"
     assert report_path.exists()
-    assert report_path.read_text() == r.text
+    assert r.json()["output_path"] == str(report_path)
+    assert "<TraceSummary" in report_path.read_text()

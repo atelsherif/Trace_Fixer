@@ -5,12 +5,19 @@ Format notes (reverse engineered from sample exports):
     per-frame <rect_vehicle_timestamp> observations. Bounding box coordinates
     (xp, yp, zp, xs, ys, zs, zrot) are in the *ego vehicle frame at that
     instant* (x forward, y left, zrot heading offset from ego).
-  - zrot's *unit* is not consistent across exports: some files (observed
-    with structurefile minorversion 8) use radians, others (minorversion 7)
-    use degrees. There's no explicit unit field, so it's auto-detected per
-    file (see `detect_vehicle_zrot_unit`) and always normalized to radians
-    on the parsed VehicleObs -- downstream code never needs to know which
-    convention the source file used.
+  - zrot is always in **degrees** in the raw file, regardless of
+    structurefile minorversion, and is normalized to radians on the parsed
+    VehicleObs (see `detect_vehicle_zrot_unit`) -- downstream code always
+    gets radians. This was not obvious: a magnitude-only heuristic (flag as
+    degrees when a raw value exceeds +-pi, since that's impossible for a
+    properly bounded relative heading as radians) correctly caught several
+    files but *missed* one whose raw values happened to stay under pi by
+    coincidence even though it was also degrees -- confirmed by
+    cross-checking decoded heading against the direction of travel implied
+    independently by each vehicle's position deltas (ADMA ground truth):
+    19.9 deg mean error misread as radians vs 0.5 deg correctly read as
+    degrees. No confirmed radians file has been found across every export
+    tested so far. See README, "Why vehicle heading can look botched".
   - <lane_markings>/<line_static_lm> and <border_polygons>/<line_bp> hold
     polyline geometry, also ego-relative, but only sampled at a handful of
     keyframes (typically scene start/end plus any frame where the road
@@ -240,16 +247,25 @@ def _parse_frame_meta(root: ET.Element) -> list[FrameMeta]:
 
 
 def detect_vehicle_zrot_unit(vehicles: dict[int, VehicleTrack]) -> str:
-    """Returns "rad" or "deg". A properly-wrapped relative heading can never
-    legitimately exceed +/-pi radians -- so if any raw zrot value does, the
-    file must be using degrees (empirically confirmed against
-    position-implied heading on multiple real exports; see README).
+    """Always returns "deg".
+
+    This used to be a real per-file heuristic: flag as degrees when a raw
+    zrot value exceeds +/-pi, since that's impossible for a properly
+    bounded relative heading as radians. That check is necessary but not
+    sufficient -- it correctly caught files whose raw values happened to
+    exceed pi, but silently missed at least one file (the project's
+    original "radians" reference sample) whose raw values happened to stay
+    under pi by coincidence despite also being degrees. Cross-checking
+    decoded heading against each vehicle's own position-implied direction
+    of travel against ADMA ground truth showed degrees fits *every* file
+    tested (mean heading error 19.9 deg misread as radians vs 0.5 deg
+    correctly read as degrees, for that file). No confirmed radians file
+    has been found, so the unit is now treated as always degrees. Kept as
+    a function (rather than inlining a constant) in case a genuine radians
+    file ever turns up in the wild and this needs to become a real check
+    again -- see README, "Why vehicle heading can look botched".
     """
-    max_abs = 0.0
-    for track in vehicles.values():
-        for obs in track.observations:
-            max_abs = max(max_abs, abs(obs.zrot))
-    return "deg" if max_abs > math.pi else "rad"
+    return "deg"
 
 
 def parse_annotation_xml(path: str | Path) -> Annotation:

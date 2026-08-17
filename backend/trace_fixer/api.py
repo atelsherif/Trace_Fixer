@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import io
-import zipfile
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -230,17 +228,27 @@ def reset(trace_id: str):
     return {"scene": build_scene_json(trace)}
 
 
+def _relative_output_path(path: Path) -> str:
+    """Display-friendly path: relative to the repo when possible (the
+    normal case), or absolute (e.g. under pytest's tmp_path) otherwise.
+    """
+    try:
+        return str(path.relative_to(REPO_ROOT))
+    except ValueError:
+        return str(path)
+
+
 @app.get("/api/traces/{trace_id}/export/adma")
 def export_adma(trace_id: str):
+    """Writes the corrected ADMA CSV into output/ and reports where. Does
+    *not* stream the file back -- every export lands in the project's
+    output/ directory rather than the browser's downloads folder; see
+    export.batch_output for the layout.
+    """
     trace = _get_trace_or_404(trace_id)
     out_path = adma_output_path(trace_id, OUTPUT_DIR)
     write_adma_csv(trace.ego, out_path)
-    content = out_path.read_text()
-    return PlainTextResponse(
-        content,
-        media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="{trace_id}_adma_fixed.csv"'},
-    )
+    return {"output_path": _relative_output_path(out_path)}
 
 
 @app.get("/api/traces/{trace_id}/export/annotation")
@@ -249,33 +257,19 @@ def export_annotation(trace_id: str, include_predictions: bool = True):
     original_path = store.original_annotation_path(trace_id)
     out_path = annotation_output_path(trace_id, original_path, OUTPUT_DIR)
     write_annotation_xml(trace, original_path, out_path, include_predictions=include_predictions)
-    content = out_path.read_bytes()
-    return StreamingResponse(
-        io.BytesIO(content),
-        media_type="application/xml",
-        headers={"Content-Disposition": f'attachment; filename="{trace_id}_annotation_fixed.xml"'},
-    )
+    return {"output_path": _relative_output_path(out_path)}
 
 
 @app.get("/api/traces/{trace_id}/export/scenario")
 def export_scenario(trace_id: str):
     trace = _get_trace_or_404(trace_id)
     xodr_path, xosc_path = scenario_output_paths(trace_id, OUTPUT_DIR)
-    xodr = generate_opendrive(trace)
-    xosc = generate_openscenario(trace, xodr_path.name)
-    xodr_path.write_text(xodr)
-    xosc_path.write_text(xosc)
-
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr(xodr_path.name, xodr)
-        zf.writestr(xosc_path.name, xosc)
-    buf.seek(0)
-    return StreamingResponse(
-        buf,
-        media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{trace_id}_scenario.zip"'},
-    )
+    xodr_path.write_text(generate_opendrive(trace))
+    xosc_path.write_text(generate_openscenario(trace, xodr_path.name))
+    return {
+        "output_path": _relative_output_path(xodr_path.parent),
+        "files": [_relative_output_path(xodr_path), _relative_output_path(xosc_path)],
+    }
 
 
 @app.get("/api/traces/{trace_id}/export/report")
@@ -283,19 +277,13 @@ def export_report(trace_id: str, format: str = "txt"):
     trace = _get_trace_or_404(trace_id)
     if format == "xml":
         content = generate_xml_report(trace)
-        media_type = "application/xml"
     elif format == "txt":
         content = generate_txt_report(trace)
-        media_type = "text/plain"
     else:
         raise HTTPException(status_code=400, detail="format must be 'txt' or 'xml'")
     out_path = report_output_path(trace_id, OUTPUT_DIR, format)
     out_path.write_text(content)
-    return PlainTextResponse(
-        content,
-        media_type=media_type,
-        headers={"Content-Disposition": f'attachment; filename="{trace_id}_summary.{format}"'},
-    )
+    return {"output_path": _relative_output_path(out_path)}
 
 
 if FRONTEND_DIR.exists():

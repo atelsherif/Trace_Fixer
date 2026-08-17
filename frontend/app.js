@@ -43,6 +43,16 @@ function setStatus(msg) {
   el("status-line").textContent = msg;
 }
 
+async function runExport(label, path) {
+  setStatus(`Exporting ${label}…`);
+  try {
+    const data = await apiGet(path);
+    setStatus(`Saved ${label} to ${data.output_path}`);
+  } catch (err) {
+    setStatus(`Export failed: ${err.message}`);
+  }
+}
+
 // ---------- Trace picker (searchable, scales to large corpora) ----------
 
 async function queryTraces(q) {
@@ -198,6 +208,7 @@ function applyScene(scene) {
   el("timeline").max = scene.duration_s.toFixed(3);
   if (state.timeS > scene.duration_s) state.timeS = 0;
   renderIssueList();
+  renderVehicleList();
   updateTimeLabel();
 }
 
@@ -422,6 +433,47 @@ function renderIssueList() {
       state.camera.followEgo = issue.vehicle_id == null;
       setPlaying(false);
       updateTimeLabel();
+      renderVehicleList();
+      draw();
+    });
+    list.appendChild(li);
+  }
+}
+
+// ---------- Vehicle list ----------
+
+function renderVehicleList() {
+  const list = el("vehicle-list");
+  list.innerHTML = "";
+  const vehicles = state.scene.vehicles;
+  el("vehicle-count").textContent = vehicles.length;
+  if (!vehicles.length) {
+    const li = document.createElement("li");
+    li.className = "issue-empty";
+    li.textContent = "No vehicles in this scene.";
+    list.appendChild(li);
+    return;
+  }
+  for (const vehicle of vehicles) {
+    const obs = vehicle.observations;
+    const li = document.createElement("li");
+    li.className = `issue-item vehicle-item${state.selectedVehicleId === vehicle.id ? " selected" : ""}`;
+    const meta = document.createElement("div");
+    meta.className = "issue-meta";
+    meta.textContent = `veh ${vehicle.id} · ${vehicle.obj_type}`;
+    const desc = document.createElement("div");
+    desc.textContent = obs.length
+      ? `${obs[0].t_s.toFixed(1)}s – ${obs[obs.length - 1].t_s.toFixed(1)}s`
+      : "no observations";
+    li.appendChild(meta);
+    li.appendChild(desc);
+    li.addEventListener("click", () => {
+      state.selectedVehicleId = vehicle.id;
+      state.camera.followEgo = false;
+      if (obs.length) state.timeS = Math.max(0, obs[0].t_s);
+      setPlaying(false);
+      updateTimeLabel();
+      renderVehicleList();
       draw();
     });
     list.appendChild(li);
@@ -653,21 +705,19 @@ function wireControls() {
     el("sync-offset-value").textContent = e.target.value;
   });
 
-  el("export-adma").addEventListener("click", () => {
-    window.location.href = `/api/traces/${state.traceId}/export/adma`;
-  });
-  el("export-annotation").addEventListener("click", () => {
-    window.location.href = `/api/traces/${state.traceId}/export/annotation`;
-  });
-  el("export-scenario").addEventListener("click", () => {
-    window.location.href = `/api/traces/${state.traceId}/export/scenario`;
-  });
-  el("export-report-txt").addEventListener("click", () => {
-    window.location.href = `/api/traces/${state.traceId}/export/report?format=txt`;
-  });
-  el("export-report-xml").addEventListener("click", () => {
-    window.location.href = `/api/traces/${state.traceId}/export/report?format=xml`;
-  });
+  el("export-adma").addEventListener("click", () => runExport("adma", `/api/traces/${state.traceId}/export/adma`));
+  el("export-annotation").addEventListener("click", () =>
+    runExport("annotation", `/api/traces/${state.traceId}/export/annotation`)
+  );
+  el("export-scenario").addEventListener("click", () =>
+    runExport("scenario", `/api/traces/${state.traceId}/export/scenario`)
+  );
+  el("export-report-txt").addEventListener("click", () =>
+    runExport("trace summary", `/api/traces/${state.traceId}/export/report?format=txt`)
+  );
+  el("export-report-xml").addEventListener("click", () =>
+    runExport("trace summary", `/api/traces/${state.traceId}/export/report?format=xml`)
+  );
 
   el("upload-btn").addEventListener("click", () => el("upload-adma").click());
   el("upload-adma").addEventListener("change", () => {
