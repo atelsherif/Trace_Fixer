@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import tempfile
 import zipfile
 from pathlib import Path
 
@@ -12,7 +11,13 @@ from pydantic import BaseModel
 
 from trace_fixer.export.adma_writer import write_adma_csv
 from trace_fixer.export.annotation_writer import write_annotation_xml
-from trace_fixer.export.batch_output import write_batch_output
+from trace_fixer.export.batch_output import (
+    adma_output_path,
+    annotation_output_path,
+    report_output_path,
+    scenario_output_paths,
+    write_batch_output,
+)
 from trace_fixer.export.opendrive import generate_opendrive
 from trace_fixer.export.openscenario import generate_openscenario
 from trace_fixer.export.report import generate_txt_report, generate_xml_report
@@ -28,7 +33,7 @@ DATA_DIR = REPO_ROOT / "data" / "traces"
 OUTPUT_DIR = REPO_ROOT / "output"
 FRONTEND_DIR = REPO_ROOT / "frontend"
 
-app = FastAPI(title="Trace Fixer")
+app = FastAPI(title="PreTwin")
 store = TraceStore(traces_dir=DATA_DIR)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -160,12 +165,13 @@ def predict_clear(trace_id: str):
 @app.post("/api/traces/{trace_id}/batch_fix_predict")
 def batch_fix_predict(trace_id: str, req: BatchFixPredictRequest = BatchFixPredictRequest()):
     """One-shot validate -> fix -> predict -> re-validate for a single trace,
-    then writes the corrected ADMA + annotation files into output/ (mirroring
-    the input corpus layout -- see export.batch_output) so processing many
-    traces produces a ready-to-use output corpus. No scene payload in the
-    response -- meant to be called in a loop over many trace_ids (see the
-    GUI's multi-select "batch" action) without paying for a full scene JSON
-    build on every one.
+    then writes every artifact (corrected ADMA + annotation, OpenDRIVE +
+    OpenSCENARIO, and a trace summary report) into output/, mirroring the
+    input corpus layout for ADMA/annotation -- see export.batch_output --
+    so processing many traces produces a ready-to-use output corpus in one
+    pass. No scene payload in the response -- meant to be called in a loop
+    over many trace_ids (see the GUI's multi-select "batch" action) without
+    paying for a full scene JSON build on every one.
     """
     try:
         trace = store.get(trace_id)
@@ -177,12 +183,23 @@ def batch_fix_predict(trace_id: str, req: BatchFixPredictRequest = BatchFixPredi
         trace, horizon_s=req.horizon_s, step_s=req.step_s, backward=req.backward, forward=req.forward
     )
     after = run_validation(trace)
+
     output_paths = write_batch_output(
         trace,
         store.original_annotation_path(trace_id),
         OUTPUT_DIR,
         include_predictions=req.include_predictions_in_output,
     )
+    xodr_path, xosc_path = scenario_output_paths(trace_id, OUTPUT_DIR)
+    xodr_path.write_text(generate_opendrive(trace))
+    xosc_path.write_text(generate_openscenario(trace, xodr_path.name))
+    output_paths["xodr_path"] = str(xodr_path)
+    output_paths["xosc_path"] = str(xosc_path)
+
+    report_path = report_output_path(trace_id, OUTPUT_DIR, "txt")
+    report_path.write_text(generate_txt_report(trace))
+    output_paths["report_path"] = str(report_path)
+
     return {
         "trace_id": trace_id,
         "before_issue_count": len(before),
@@ -216,13 +233,9 @@ def reset(trace_id: str):
 @app.get("/api/traces/{trace_id}/export/adma")
 def export_adma(trace_id: str):
     trace = _get_trace_or_404(trace_id)
-    with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
-        tmp_path = Path(tmp.name)
-    try:
-        write_adma_csv(trace.ego, tmp_path)
-        content = tmp_path.read_text()
-    finally:
-        tmp_path.unlink(missing_ok=True)
+    out_path = adma_output_path(trace_id, OUTPUT_DIR)
+    write_adma_csv(trace.ego, out_path)
+    content = out_path.read_text()
     return PlainTextResponse(
         content,
         media_type="text/csv",
@@ -234,13 +247,9 @@ def export_adma(trace_id: str):
 def export_annotation(trace_id: str, include_predictions: bool = True):
     trace = _get_trace_or_404(trace_id)
     original_path = store.original_annotation_path(trace_id)
-    with tempfile.NamedTemporaryFile(suffix=".xml", delete=False) as tmp:
-        tmp_path = Path(tmp.name)
-    try:
-        write_annotation_xml(trace, original_path, tmp_path, include_predictions=include_predictions)
-        content = tmp_path.read_bytes()
-    finally:
-        tmp_path.unlink(missing_ok=True)
+    out_path = annotation_output_path(trace_id, original_path, OUTPUT_DIR)
+    write_annotation_xml(trace, original_path, out_path, include_predictions=include_predictions)
+    content = out_path.read_bytes()
     return StreamingResponse(
         io.BytesIO(content),
         media_type="application/xml",
@@ -251,14 +260,16 @@ def export_annotation(trace_id: str, include_predictions: bool = True):
 @app.get("/api/traces/{trace_id}/export/scenario")
 def export_scenario(trace_id: str):
     trace = _get_trace_or_404(trace_id)
-    xodr_filename = f"{trace_id}.xodr"
+    xodr_path, xosc_path = scenario_output_paths(trace_id, OUTPUT_DIR)
     xodr = generate_opendrive(trace)
-    xosc = generate_openscenario(trace, xodr_filename)
+    xosc = generate_openscenario(trace, xodr_path.name)
+    xodr_path.write_text(xodr)
+    xosc_path.write_text(xosc)
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr(xodr_filename, xodr)
-        zf.writestr(f"{trace_id}.xosc", xosc)
+        zf.writestr(xodr_path.name, xodr)
+        zf.writestr(xosc_path.name, xosc)
     buf.seek(0)
     return StreamingResponse(
         buf,
@@ -272,16 +283,18 @@ def export_report(trace_id: str, format: str = "txt"):
     trace = _get_trace_or_404(trace_id)
     if format == "xml":
         content = generate_xml_report(trace)
-        media_type, ext = "application/xml", "xml"
+        media_type = "application/xml"
     elif format == "txt":
         content = generate_txt_report(trace)
-        media_type, ext = "text/plain", "txt"
+        media_type = "text/plain"
     else:
         raise HTTPException(status_code=400, detail="format must be 'txt' or 'xml'")
+    out_path = report_output_path(trace_id, OUTPUT_DIR, format)
+    out_path.write_text(content)
     return PlainTextResponse(
         content,
         media_type=media_type,
-        headers={"Content-Disposition": f'attachment; filename="{trace_id}_problem_report.{ext}"'},
+        headers={"Content-Disposition": f'attachment; filename="{trace_id}_summary.{format}"'},
     )
 
 

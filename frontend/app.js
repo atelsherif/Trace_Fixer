@@ -434,12 +434,39 @@ function updateTimeLabel() {
   const dur = state.scene ? state.scene.duration_s : 0;
   el("time-label").textContent = `${state.timeS.toFixed(2)} / ${dur.toFixed(2)} s`;
   el("timeline").value = state.timeS;
+  updatePlayButtonIcon();
+}
+
+function isAtEnd() {
+  return !!state.scene && state.timeS >= state.scene.duration_s - 1e-6;
+}
+
+function updatePlayButtonIcon() {
+  const btn = el("play-pause");
+  if (state.playing) {
+    btn.innerHTML = "&#10074;&#10074;"; // pause
+    btn.title = "Pause (Space)";
+  } else if (isAtEnd()) {
+    btn.innerHTML = "&#8635;"; // replay
+    btn.title = "Replay from the start (Space)";
+  } else {
+    btn.innerHTML = "&#9654;"; // play
+    btn.title = "Play (Space)";
+  }
 }
 
 function setPlaying(playing) {
   state.playing = playing;
-  el("play-pause").innerHTML = playing ? "&#10074;&#10074;" : "&#9654;";
   state.lastFrameMs = null;
+  updatePlayButtonIcon();
+}
+
+function togglePlayPause() {
+  if (!state.playing && isAtEnd()) {
+    state.timeS = 0; // pressing play/replay after the trace finished starts over
+  }
+  setPlaying(!state.playing);
+  updateTimeLabel();
 }
 
 function stepTime(deltaS) {
@@ -513,7 +540,7 @@ function wireControls() {
   el("scan-path").addEventListener("keydown", (e) => { if (e.key === "Enter") runScan(); });
 
   // -- playback --
-  el("play-pause").addEventListener("click", () => setPlaying(!state.playing));
+  el("play-pause").addEventListener("click", togglePlayPause);
   el("restart").addEventListener("click", () => {
     state.timeS = 0;
     updateTimeLabel();
@@ -527,7 +554,7 @@ function wireControls() {
   window.addEventListener("keydown", (e) => {
     const tag = (document.activeElement && document.activeElement.tagName) || "";
     if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
-    if (e.code === "Space") { e.preventDefault(); setPlaying(!state.playing); }
+    if (e.code === "Space") { e.preventDefault(); togglePlayPause(); }
     else if (e.code === "ArrowLeft") { e.preventDefault(); stepTime(-1); }
     else if (e.code === "ArrowRight") { e.preventDefault(); stepTime(1); }
     else if (e.code === "Home") { e.preventDefault(); state.timeS = 0; setPlaying(false); updateTimeLabel(); draw(); }

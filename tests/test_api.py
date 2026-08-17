@@ -93,16 +93,47 @@ def test_batch_fix_predict_runs_full_pipeline(client_with_corpus):
     r2 = client.post(f"/api/traces/{names[0]}/validate")
     assert r2.json()["issue_count"] == data["after_issue_count"]
 
-    # corrected files were written into output/, mirroring the input layout
-    adma_out = Path(data["output"]["adma_path"])
-    annotation_out = Path(data["output"]["annotation_path"])
+    # every artifact was written into output/, mirroring the input layout
+    out = data["output"]
+    adma_out = Path(out["adma_path"])
+    annotation_out = Path(out["annotation_path"])
+    xodr_out = Path(out["xodr_path"])
+    xosc_out = Path(out["xosc_path"])
+    report_out = Path(out["report_path"])
     assert adma_out == output_dir / "adma" / "ADMA" / names[0] / "adma.csv"
-    assert adma_out.exists()
     assert annotation_out.parent == output_dir / "annotations" / "Annotations"
-    assert annotation_out.exists()
+    assert xodr_out == output_dir / "scenarios" / names[0] / f"{names[0]}.xodr"
+    assert xosc_out == output_dir / "scenarios" / names[0] / f"{names[0]}.xosc"
+    assert report_out == output_dir / "reports" / names[0] / f"{names[0]}_summary.txt"
+    for p in (adma_out, annotation_out, xodr_out, xosc_out, report_out):
+        assert p.exists()
 
 
 def test_batch_fix_predict_404_for_unknown_trace(client_with_corpus):
     client, _names, _output_dir = client_with_corpus
     r = client.post("/api/traces/does-not-exist/batch_fix_predict")
     assert r.status_code == 404
+
+
+def test_individual_export_endpoints_also_write_to_output(client_with_corpus):
+    client, names, output_dir = client_with_corpus
+    trace_id = names[0]
+
+    r = client.get(f"/api/traces/{trace_id}/export/adma")
+    assert r.status_code == 200
+    assert (output_dir / "adma" / "ADMA" / trace_id / "adma.csv").exists()
+
+    r = client.get(f"/api/traces/{trace_id}/export/annotation")
+    assert r.status_code == 200
+    assert any((output_dir / "annotations" / "Annotations").glob(f"{trace_id}*"))
+
+    r = client.get(f"/api/traces/{trace_id}/export/scenario")
+    assert r.status_code == 200
+    assert (output_dir / "scenarios" / trace_id / f"{trace_id}.xodr").exists()
+    assert (output_dir / "scenarios" / trace_id / f"{trace_id}.xosc").exists()
+
+    r = client.get(f"/api/traces/{trace_id}/export/report", params={"format": "xml"})
+    assert r.status_code == 200
+    report_path = output_dir / "reports" / trace_id / f"{trace_id}_summary.xml"
+    assert report_path.exists()
+    assert report_path.read_text() == r.text

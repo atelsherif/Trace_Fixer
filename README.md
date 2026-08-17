@@ -1,4 +1,4 @@
-# Trace Fixer
+# PreTwin
 
 A tool for reviewing, validating, and repairing recorded vehicle-trajectory
 logs before they're used to build simulation scenarios. Each recorded log is
@@ -10,7 +10,7 @@ a pair of files:
   vision) with per-frame vehicle bounding boxes, lane markings, road edges,
   and static objects, all in the ego vehicle's own reference frame.
 
-Trace Fixer parses both, reconstructs a single consistent global-coordinate
+PreTwin parses both, reconstructs a single consistent global-coordinate
 scene, replays it in a browser GUI, flags physically-implausible annotation
 data, applies rule-based fixes, predicts a vehicle's likely path before it
 entered the Lidar's field of view, and exports the corrected trace plus an
@@ -22,6 +22,9 @@ OpenDRIVE/OpenSCENARIO bundle for simulation.
 pip install -r requirements.txt
 PYTHONPATH=backend python3 -m trace_fixer.main   # serves on http://localhost:8000
 ```
+
+(The Python package is still named `trace_fixer` internally — only the
+displayed product name changed to PreTwin.)
 
 Open `http://localhost:8000` in a browser. Two sample traces are bundled
 and load automatically: `sample1` (`data/traces/sample1/`, radians-unit
@@ -71,10 +74,9 @@ python3 -m pytest
 5. **Sync offset** nudges the annotation clock against the ADMA clock (see
    *Time alignment* below) — drag while watching the replay.
 6. **Export** the fixed ADMA CSV, fixed annotation XML, an
-   OpenDRIVE + OpenSCENARIO `.zip`, or a **problem report** (`.txt` or
-   `.xml`) listing every flagged issue — category, severity, vehicle,
-   time range, description, fixed/open — for an annotation QA team to
-   triage without opening the XML.
+   OpenDRIVE + OpenSCENARIO `.zip`, or a **trace summary** (`.txt` or
+   `.xml`) — see *Trace summary report* below. Every export also lands in
+   `output/` — see *Output directory* below.
 
 "Reset trace" reloads the original files from disk, discarding all fixes/
 predictions/offset changes made in the session.
@@ -84,7 +86,9 @@ predictions/offset changes made in the session.
 Restart/replay (⏮), step back/forward 1s, play/pause, a loop toggle, and a
 speed selector, all in the timeline bar. Keyboard shortcuts (ignored while
 typing in a text field): **Space** play/pause, **←/→** step back/forward 1s,
-**Home** jump to the start.
+**Home** jump to the start. The play button itself turns into a replay
+button (↻) once the timeline reaches the end, so pressing it (or Space)
+again starts over from the beginning instead of doing nothing.
 
 ### Bulk directory scanning
 
@@ -115,22 +119,46 @@ the individual buttons run), with live progress and a final "issues before
 → after" summary; failures on individual traces (e.g. an unparseable file)
 are reported by name rather than aborting the batch. If the trace you're
 currently viewing was included, it's reloaded afterward so the GUI reflects
-the result.
+the result. Every artifact — corrected ADMA + annotation, OpenDRIVE +
+OpenSCENARIO, and a trace summary report — is written to `output/` for each
+processed trace; see *Output directory* below.
 
-Each processed trace's corrected ADMA + annotation files are also written
-automatically into the project's gitignored `output/` directory, mirroring
-the input corpus layout:
+### Trace summary report
+
+The `.txt` / `.xml` export (per-trace button, or written automatically by
+the batch action) is a standalone summary meant for a QA/review team,
+covering:
+
+- **Scene composition** — object count by type (car, truck, ...).
+- **Ego braking events** — sustained deceleration above ~3 m/s² (moderate)
+  or ~6 m/s² (hard/AEB-like), detected from the ADMA speed profile.
+- **Overtake events** — a vehicle crossing from behind the ego to ahead of
+  it (`vehicle_overtakes_ego`) or vice versa (`ego_overtakes_vehicle`),
+  while staying within roughly two lane-widths laterally; tags which
+  vehicle, when, and which direction.
+- **Data-quality issues** — the same validation findings as the GUI issue
+  list (category, severity, vehicle, time range, fixed/open).
+
+### Output directory
+
+Every export — the per-trace download buttons *and* the batch action —
+writes into the project's gitignored `output/` directory, in a
+subdirectory per artifact type:
 
 ```
 output/adma/ADMA/<trace_id>/adma.csv
 output/annotations/Annotations/<original annotation filename>
+output/scenarios/<trace_id>/<trace_id>.xodr
+output/scenarios/<trace_id>/<trace_id>.xosc
+output/reports/<trace_id>/<trace_id>_summary.<txt|xml>
 ```
 
-The annotation filename is preserved exactly as scanned (suffix variant and
-all) so the output corpus can be handed off, or re-scanned as input
-elsewhere, the same way the source was. This is specific to the batch
-action — the per-trace export buttons still stream a single file to your
-browser's normal download location instead.
+The ADMA/annotation layout mirrors the input corpus convention (annotation
+filename preserved exactly as scanned, suffix variant and all) so that
+output can be handed off, or re-scanned as input elsewhere, the same way
+the source was. The per-trace download buttons still also stream the file
+to your browser as before — `output/` is a persistent copy in addition to
+that, not a replacement for it.
 
 ## Architecture
 
@@ -155,14 +183,19 @@ backend/trace_fixer/
   validation/fixes.py         smoothing, off-road clamp, trailing-collision
                                trim
   prediction/extrapolate.py   backward, lane-following trajectory prediction
+  analysis.py                 object counts, ego braking events, overtake
+                               events -- feeds export/report.py
   export/adma_writer.py       EgoTrace -> ADMA CSV
   export/annotation_writer.py surgically patches the *original* XML tree
                                (only touches what was fixed/predicted)
   export/opendrive.py         minimal piecewise-linear OpenDRIVE road
   export/openscenario.py      OpenSCENARIO FollowTrajectoryAction replay
-  export/report.py            problem-report export (txt / xml)
-  export/batch_output.py      writes corrected files into output/, mirroring
-                               the input corpus layout (batch action only)
+  export/report.py            trace summary export (txt / xml): scene
+                               composition, braking/overtake events, issues
+  export/batch_output.py      resolves + writes every export into output/,
+                               mirroring the input corpus layout for
+                               ADMA/annotation (used by every export path,
+                               not just the batch action)
   scan.py                     bulk directory walk + ADMA<->annotation
                                filename matching, for large corpora
   scene.py                    ties it together into one JSON payload
@@ -234,13 +267,13 @@ and explainable rules are what an annotation QA team can act on directly.
 
 Two distinct issues surfaced here, on two different sample traces, and it's
 worth being precise about which is which since only one of them was a bug
-in Trace Fixer.
+in PreTwin.
 
-**1. `zrot` unit inconsistency across annotation exports (a real Trace
-Fixer bug, now fixed).** Not every export encodes vehicle `zrot` in
+**1. `zrot` unit inconsistency across annotation exports (a real PreTwin
+bug, now fixed).** Not every export encodes vehicle `zrot` in
 radians. `sample1` (structurefile minorversion 8) does; other exports
 (minorversion 7, e.g. `sample2`) encode it in **degrees** instead, with no
-explicit unit field to tell them apart. Trace Fixer originally assumed
+explicit unit field to tell them apart. PreTwin originally assumed
 radians unconditionally, which for a degrees file turns a harmless value
 like `-8.47` into "-8.47 radians" (-485°, over a full extra rotation) --
 vehicles rendered rotating in place or pointing perpendicular to their
