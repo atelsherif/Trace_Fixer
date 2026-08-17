@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from trace_fixer.export.adma_writer import write_adma_csv
 from trace_fixer.export.annotation_writer import write_annotation_xml
+from trace_fixer.export.batch_output import write_batch_output
 from trace_fixer.export.opendrive import generate_opendrive
 from trace_fixer.export.openscenario import generate_openscenario
 from trace_fixer.export.report import generate_txt_report, generate_xml_report
@@ -24,10 +25,12 @@ from trace_fixer.validation.fixes import apply_fixes
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = REPO_ROOT / "data" / "traces"
+OUTPUT_DIR = REPO_ROOT / "output"
 FRONTEND_DIR = REPO_ROOT / "frontend"
 
 app = FastAPI(title="Trace Fixer")
 store = TraceStore(traces_dir=DATA_DIR)
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _get_trace_or_404(trace_id: str):
@@ -132,6 +135,10 @@ class PredictRequest(BaseModel):
     forward: bool = True
 
 
+class BatchFixPredictRequest(PredictRequest):
+    include_predictions_in_output: bool = True
+
+
 @app.post("/api/traces/{trace_id}/predict")
 def predict(trace_id: str, req: PredictRequest = PredictRequest()):
     trace = _get_trace_or_404(trace_id)
@@ -151,11 +158,14 @@ def predict_clear(trace_id: str):
 
 
 @app.post("/api/traces/{trace_id}/batch_fix_predict")
-def batch_fix_predict(trace_id: str, req: PredictRequest = PredictRequest()):
+def batch_fix_predict(trace_id: str, req: BatchFixPredictRequest = BatchFixPredictRequest()):
     """One-shot validate -> fix -> predict -> re-validate for a single trace,
-    with no scene payload in the response -- meant to be called in a loop
-    over many trace_ids (see the GUI's multi-select "batch" action) without
-    paying for a full scene JSON build on every one.
+    then writes the corrected ADMA + annotation files into output/ (mirroring
+    the input corpus layout -- see export.batch_output) so processing many
+    traces produces a ready-to-use output corpus. No scene payload in the
+    response -- meant to be called in a loop over many trace_ids (see the
+    GUI's multi-select "batch" action) without paying for a full scene JSON
+    build on every one.
     """
     try:
         trace = store.get(trace_id)
@@ -167,12 +177,19 @@ def batch_fix_predict(trace_id: str, req: PredictRequest = PredictRequest()):
         trace, horizon_s=req.horizon_s, step_s=req.step_s, backward=req.backward, forward=req.forward
     )
     after = run_validation(trace)
+    output_paths = write_batch_output(
+        trace,
+        store.original_annotation_path(trace_id),
+        OUTPUT_DIR,
+        include_predictions=req.include_predictions_in_output,
+    )
     return {
         "trace_id": trace_id,
         "before_issue_count": len(before),
         "after_issue_count": len(after),
         "fix_summary": fix_summary,
         "predicted": added,
+        "output": output_paths,
     }
 
 

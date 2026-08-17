@@ -15,6 +15,7 @@ Predicted entries are marked so downstream consumers can filter them out:
 from __future__ import annotations
 
 import copy
+import math
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -23,6 +24,13 @@ from trace_fixer.models import Trace
 
 def _fmt(v: float) -> str:
     return repr(float(v))
+
+
+def _zrot_out(obs_zrot_rad: float, unit: str) -> float:
+    """VehicleObs.zrot is always canonical radians internally; convert back
+    to whatever unit the source file used (see parsers.annotation_xml) so
+    the exported file stays internally consistent."""
+    return math.degrees(obs_zrot_rad) if unit == "deg" else obs_zrot_rad
 
 
 def write_annotation_xml(
@@ -36,6 +44,7 @@ def write_annotation_xml(
     vehicles_el = root.find("vehicles")
     if vehicles_el is None:
         raise ValueError("Source annotation XML has no <vehicles> section")
+    zrot_unit = trace.annotation.vehicle_zrot_unit
 
     for rv in vehicles_el.findall("rect_vehicle"):
         obj_id_text = rv.findtext("id")
@@ -74,7 +83,7 @@ def write_annotation_xml(
                 continue
             coords.find("xp").text = _fmt(obs.x_rel)
             coords.find("yp").text = _fmt(obs.y_rel)
-            coords.find("zrot").text = _fmt(obs.zrot)
+            coords.find("zrot").text = _fmt(_zrot_out(obs.zrot, zrot_unit))
 
         if include_predictions:
             synthetic = [o for o in track.observations if o.synthetic]
@@ -105,7 +114,7 @@ def write_annotation_xml(
                             coords.find("xs").text = _fmt(obs.length)
                             coords.find("ys").text = _fmt(obs.width)
                             coords.find("zs").text = _fmt(obs.height)
-                            coords.find("zrot").text = _fmt(obs.zrot)
+                            coords.find("zrot").text = _fmt(_zrot_out(obs.zrot, zrot_unit))
                         new_elements.append(el)
                     timestamps_el.extend(new_elements)
 

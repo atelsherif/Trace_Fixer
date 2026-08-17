@@ -23,9 +23,11 @@ pip install -r requirements.txt
 PYTHONPATH=backend python3 -m trace_fixer.main   # serves on http://localhost:8000
 ```
 
-Open `http://localhost:8000` in a browser. A sample trace (`sample1`) is
-bundled under `data/traces/sample1/` and loads automatically. Add more
-traces either by:
+Open `http://localhost:8000` in a browser. Two sample traces are bundled
+and load automatically: `sample1` (`data/traces/sample1/`, radians-unit
+annotation export) and `sample2` (`data/traces/sample2/`, degrees-unit
+annotation export — see *Why vehicle heading can look "botched"* below).
+Add more traces either by:
 
 - **Upload trace…** in the top bar — for one-off pairs; each upload gets its
   own `data/traces/<id>/` directory (copied onto the server).
@@ -113,10 +115,22 @@ the individual buttons run), with live progress and a final "issues before
 → after" summary; failures on individual traces (e.g. an unparseable file)
 are reported by name rather than aborting the batch. If the trace you're
 currently viewing was included, it's reloaded afterward so the GUI reflects
-the result. This only runs the two auto-fixable steps — it doesn't export
-anything on its own, so pair it with the per-trace export buttons (or script
-against the same `/export/*` endpoints) for the traces you want to pull out
-afterward.
+the result.
+
+Each processed trace's corrected ADMA + annotation files are also written
+automatically into the project's gitignored `output/` directory, mirroring
+the input corpus layout:
+
+```
+output/adma/ADMA/<trace_id>/adma.csv
+output/annotations/Annotations/<original annotation filename>
+```
+
+The annotation filename is preserved exactly as scanned (suffix variant and
+all) so the output corpus can be handed off, or re-scanned as input
+elsewhere, the same way the source was. This is specific to the batch
+action — the per-trace export buttons still stream a single file to your
+browser's normal download location instead.
 
 ## Architecture
 
@@ -124,7 +138,9 @@ afterward.
 backend/trace_fixer/
   parsers/adma_csv.py         ADMA CSV -> EgoTrace (lat/lon/heading/velocity)
   parsers/annotation_xml.py   Annotation XML -> vehicles, lane markings,
-                               border lines, static objects (all ego-relative)
+                               border lines, static objects (all ego-relative);
+                               auto-detects vehicle zrot's unit (rad vs deg)
+                               per file and normalizes to radians
   geo/transform.py            lat/lon -> local ENU meters, ego pose
                                interpolation, ego-relative <-> global
   geo/populate.py             fills in global (x, y, heading) on every
@@ -145,6 +161,8 @@ backend/trace_fixer/
   export/opendrive.py         minimal piecewise-linear OpenDRIVE road
   export/openscenario.py      OpenSCENARIO FollowTrajectoryAction replay
   export/report.py            problem-report export (txt / xml)
+  export/batch_output.py      writes corrected files into output/, mirroring
+                               the input corpus layout (batch action only)
   scan.py                     bulk directory walk + ADMA<->annotation
                                filename matching, for large corpora
   scene.py                    ties it together into one JSON payload
@@ -178,8 +196,11 @@ displacement over time:
   (meters), anchored at the trace's first ADMA sample (equirectangular
   projection — fine at single-log scale).
 - Annotation bounding boxes (`xp` forward, `yp` left, `zrot` heading offset
-  from ego, all in radians/meters) are in the **vehicle body frame**:
-  `global = ego_xy + R(yaw) @ (xp, yp)`.
+  from ego, positions in meters) are in the **vehicle body frame**:
+  `global = ego_xy + R(yaw) @ (xp, yp)`. `zrot`'s unit varies by export
+  (radians in some files, degrees in others) and is auto-detected per file
+  — see *Why vehicle heading can look "botched"* below; internally it's
+  always normalized to radians.
 - `ADTF_CHUNK_TIME` (ADMA) and the `chunktime` attribute (annotation) are
   both ADTF pipeline clocks, ~100 Hz for ADMA and much sparser for
   annotation keyframes; see *Time alignment* below.
@@ -209,35 +230,56 @@ and explainable rules are what an annotation QA team can act on directly.
 | Collision (vehicle↔ego) | Bounding boxes overlap | Trailing overlaps (track ends inside the ego box — a common "lost track as it merged" artifact) are trimmed. Mid-track overlaps are flagged only |
 | Collision (vehicle↔vehicle) | Bounding boxes overlap | Flagged only (no auto-fix — resolving which of two vehicles is "wrong" isn't well-defined without more context, including between two independently-predicted pre-FOV segments) |
 
-### Why vehicle heading looks "botched" before you fix it
+### Why vehicle heading can look "botched" -- two separate causes
 
-The annotation's `zrot` field (vehicle heading offset from ego) is *not*
-tracked continuously frame-by-frame. Plotting it out shows long runs of an
-exact, bit-for-bit-identical value across dozens to hundreds of consecutive
-frames (e.g. one vehicle in the sample trace holds `zrot = 13.8°` for 295
-frames straight), interrupted by occasional single-frame spikes to an
-unrelated value, while the vehicle's tracked *position* changes smoothly
-every frame throughout. That pattern — long constant holds, sharp jumps, no
-frame-to-frame drift — is the signature of a sparse, held/keyframed value
-from the labeling tool, not per-frame sensor noise. Meanwhile the vehicle's
-true direction of travel, computed independently from its position deltas,
-tracks smoothly and consistently the whole time (confirmed against the
-sample trace, where it stays within a couple of degrees of the ego heading
-throughout, as expected for same-direction highway traffic). In other
-words: the raw annotation data is what's inconsistent here, not Trace
-Fixer's decoding of it — `heading_deg = ego_yaw + zrot` reproduces this
-held-then-jumps pattern faithfully because that's genuinely what's in the
-file.
+Two distinct issues surfaced here, on two different sample traces, and it's
+worth being precise about which is which since only one of them was a bug
+in Trace Fixer.
 
-This is exactly what **Apply fixes** already corrects: it re-derives each
-vehicle's heading from the tangent of its *smoothed position path* rather
-than trusting `zrot` at all, then re-encodes the corrected heading back into
-the exported ego-relative `zrot`. After fixing, stored heading matches the
-position-implied direction of travel to within ~0.1° for every vehicle in
-the sample trace. If you want to see the raw, unfixed annotation's heading
-error for yourself, run validation before fixing — the erratic values show
-up as `kinematic` / yaw-rate issues (jumps in the 15–180°/s range between
-frames), which is the same signal that flags this automatically.
+**1. `zrot` unit inconsistency across annotation exports (a real Trace
+Fixer bug, now fixed).** Not every export encodes vehicle `zrot` in
+radians. `sample1` (structurefile minorversion 8) does; other exports
+(minorversion 7, e.g. `sample2`) encode it in **degrees** instead, with no
+explicit unit field to tell them apart. Trace Fixer originally assumed
+radians unconditionally, which for a degrees file turns a harmless value
+like `-8.47` into "-8.47 radians" (-485°, over a full extra rotation) --
+vehicles rendered rotating in place or pointing perpendicular to their
+direction of travel, exactly as reported. This is now auto-detected per
+file (`parsers.annotation_xml.detect_vehicle_zrot_unit`): a properly
+bounded relative heading can never legitimately exceed +/-pi as radians, so
+if any raw value in the file does, the file must be in degrees. Verified
+against both conventions by comparing decoded heading to the direction of
+travel implied independently by each vehicle's own position deltas: sample
+files misread with the wrong unit produce a near-random ~90°+ average
+error; correctly detected, the error is a few degrees, in line with normal
+annotation noise. `VehicleObs.zrot` is always normalized to radians
+internally regardless of source convention; export converts back to
+whichever unit the original file used, so a "degrees" file is written back
+in degrees (see `export.annotation_writer`).
+
+**2. Long held/keyframed `zrot` values within a single file (a genuine
+source-data characteristic, not a bug).** Independent of the unit issue,
+`zrot` is not tracked continuously frame-by-frame even within one file.
+Plotting it out shows long runs of an exact, bit-for-bit-identical value
+across dozens to hundreds of consecutive frames (e.g. one `sample1` vehicle
+holds the same value for 295 frames straight), interrupted by occasional
+single-frame spikes, while the vehicle's tracked *position* changes
+smoothly every frame throughout. That pattern -- long constant holds, sharp
+jumps, no frame-to-frame drift -- is the signature of a sparse,
+held/keyframed value from the labeling tool, not per-frame sensor noise or
+a decoding error: `heading_deg = ego_yaw + zrot` reproduces it faithfully
+because that's genuinely what's in the file.
+
+**Apply fixes** already corrects #2 (and would mask #1 too, which is why
+it's worth fixing #1 at the source instead of relying on that): it
+re-derives each vehicle's heading from the tangent of its *smoothed
+position path* rather than trusting `zrot` at all, then re-encodes the
+corrected heading back into the exported `zrot` (in the file's own unit).
+After fixing, stored heading matches the position-implied direction of
+travel to within ~0.1° for every vehicle in `sample1`. If you want to see
+the raw, unfixed annotation's heading error for yourself, run validation
+before fixing -- the erratic values show up as `kinematic` / yaw-rate
+issues, which is the same signal that flags this automatically.
 
 ## Known limitations / scope (v1)
 

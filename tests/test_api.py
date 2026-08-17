@@ -24,6 +24,8 @@ def client_with_corpus(tmp_path):
     from trace_fixer.store import TraceStore
 
     api_module.store = TraceStore(traces_dir=tmp_path / "traces_dir")
+    api_module.OUTPUT_DIR = tmp_path / "output"
+    api_module.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
     corpus = tmp_path / "corpus"
     names = ["Trace-A", "Trace-B", "Trace-C"]
@@ -39,11 +41,11 @@ def client_with_corpus(tmp_path):
     r = client.post("/api/traces/scan", json={"path": str(corpus)})
     assert r.status_code == 200
     assert r.json()["matched"] == 3
-    return client, names
+    return client, names, api_module.OUTPUT_DIR
 
 
 def test_neighbor_cycles_through_full_sorted_list(client_with_corpus):
-    client, names = client_with_corpus
+    client, names, _output_dir = client_with_corpus
     sorted_names = sorted(names, key=str.lower)
 
     r = client.get(f"/api/traces/{sorted_names[0]}/neighbor", params={"direction": "next"})
@@ -58,7 +60,7 @@ def test_neighbor_cycles_through_full_sorted_list(client_with_corpus):
 
 
 def test_neighbor_respects_search_query(client_with_corpus):
-    client, names = client_with_corpus
+    client, names, _output_dir = client_with_corpus
     r = client.get(f"/api/traces/{names[0]}/neighbor", params={"direction": "next", "q": names[0]})
     assert r.status_code == 200
     assert r.json()["trace_id"] == names[0]  # only itself matches the query -> stays put
@@ -66,19 +68,19 @@ def test_neighbor_respects_search_query(client_with_corpus):
 
 
 def test_neighbor_rejects_bad_direction(client_with_corpus):
-    client, names = client_with_corpus
+    client, names, _output_dir = client_with_corpus
     r = client.get(f"/api/traces/{names[0]}/neighbor", params={"direction": "up"})
     assert r.status_code == 400
 
 
 def test_neighbor_404_for_unknown_trace(client_with_corpus):
-    client, _names = client_with_corpus
+    client, _names, _output_dir = client_with_corpus
     r = client.get("/api/traces/does-not-exist/neighbor", params={"direction": "next"})
     assert r.status_code == 404
 
 
 def test_batch_fix_predict_runs_full_pipeline(client_with_corpus):
-    client, names = client_with_corpus
+    client, names, output_dir = client_with_corpus
     r = client.post(f"/api/traces/{names[0]}/batch_fix_predict")
     assert r.status_code == 200
     data = r.json()
@@ -91,8 +93,16 @@ def test_batch_fix_predict_runs_full_pipeline(client_with_corpus):
     r2 = client.post(f"/api/traces/{names[0]}/validate")
     assert r2.json()["issue_count"] == data["after_issue_count"]
 
+    # corrected files were written into output/, mirroring the input layout
+    adma_out = Path(data["output"]["adma_path"])
+    annotation_out = Path(data["output"]["annotation_path"])
+    assert adma_out == output_dir / "adma" / "ADMA" / names[0] / "adma.csv"
+    assert adma_out.exists()
+    assert annotation_out.parent == output_dir / "annotations" / "Annotations"
+    assert annotation_out.exists()
+
 
 def test_batch_fix_predict_404_for_unknown_trace(client_with_corpus):
-    client, _names = client_with_corpus
+    client, _names, _output_dir = client_with_corpus
     r = client.post("/api/traces/does-not-exist/batch_fix_predict")
     assert r.status_code == 404

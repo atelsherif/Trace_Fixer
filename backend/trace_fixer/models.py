@@ -126,6 +126,12 @@ class Annotation:
     lane_markings: dict[int, LaneMarking] = field(default_factory=dict)
     border_lines: dict[int, BorderLine] = field(default_factory=dict)
     static_objects: dict[int, StaticObject] = field(default_factory=dict)
+    # "rad" or "deg" -- some exports encode vehicle zrot in degrees rather
+    # than radians (see parsers.annotation_xml.detect_vehicle_zrot_unit).
+    # VehicleObs.zrot is always normalized to radians internally regardless;
+    # this records the *source file's* convention so export can convert
+    # fixed/predicted values back to match it.
+    vehicle_zrot_unit: str = "rad"
 
 
 @dataclass

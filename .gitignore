@@ -7,3 +7,4 @@ venv/
 data/exports/
 node_modules/
 .DS_Store
+/output/

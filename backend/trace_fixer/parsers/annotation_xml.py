@@ -1,10 +1,16 @@
 """Parser for the manually-annotated scene XML (Lidar/vision label export).
 
-Format notes (reverse engineered from a sample export):
+Format notes (reverse engineered from sample exports):
   - <vehicles>/<rect_vehicle> holds one track per tracked object, with sparse
     per-frame <rect_vehicle_timestamp> observations. Bounding box coordinates
     (xp, yp, zp, xs, ys, zs, zrot) are in the *ego vehicle frame at that
-    instant* (x forward, y left, zrot heading offset from ego in radians).
+    instant* (x forward, y left, zrot heading offset from ego).
+  - zrot's *unit* is not consistent across exports: some files (observed
+    with structurefile minorversion 8) use radians, others (minorversion 7)
+    use degrees. There's no explicit unit field, so it's auto-detected per
+    file (see `detect_vehicle_zrot_unit`) and always normalized to radians
+    on the parsed VehicleObs -- downstream code never needs to know which
+    convention the source file used.
   - <lane_markings>/<line_static_lm> and <border_polygons>/<line_bp> hold
     polyline geometry, also ego-relative, but only sampled at a handful of
     keyframes (typically scene start/end plus any frame where the road
@@ -12,10 +18,12 @@ Format notes (reverse engineered from a sample export):
     xp_1/yp_1/zp_1, xp_2/yp_2/zp_2, ... in element order.
   - <static_objects>/<rect_static> holds static objects (signs, poles, ...)
     with the same per-instant ego-relative bounding box convention as
-    vehicles.
+    vehicles. Their zrot appears to follow a different (wider-range, not
+    investigated) convention and is left untouched by unit detection.
 """
 from __future__ import annotations
 
+import math
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -231,6 +239,19 @@ def _parse_frame_meta(root: ET.Element) -> list[FrameMeta]:
     return out
 
 
+def detect_vehicle_zrot_unit(vehicles: dict[int, VehicleTrack]) -> str:
+    """Returns "rad" or "deg". A properly-wrapped relative heading can never
+    legitimately exceed +/-pi radians -- so if any raw zrot value does, the
+    file must be using degrees (empirically confirmed against
+    position-implied heading on multiple real exports; see README).
+    """
+    max_abs = 0.0
+    for track in vehicles.values():
+        for obs in track.observations:
+            max_abs = max(max_abs, abs(obs.zrot))
+    return "deg" if max_abs > math.pi else "rad"
+
+
 def parse_annotation_xml(path: str | Path) -> Annotation:
     path = Path(path)
     tree = ET.parse(path)
@@ -240,11 +261,19 @@ def parse_annotation_xml(path: str | Path) -> Annotation:
     if scene_attrs is not None:
         country_code = _text(scene_attrs, "Country_code")
 
+    vehicles = _parse_vehicles(root)
+    zrot_unit = detect_vehicle_zrot_unit(vehicles)
+    if zrot_unit == "deg":
+        for track in vehicles.values():
+            for obs in track.observations:
+                obs.zrot = math.radians(obs.zrot)
+
     return Annotation(
         country_code=country_code,
         frame_meta=_parse_frame_meta(root),
-        vehicles=_parse_vehicles(root),
+        vehicles=vehicles,
         lane_markings=_parse_lane_markings(root),
         border_lines=_parse_border_lines(root),
         static_objects=_parse_static_objects(root),
+        vehicle_zrot_unit=zrot_unit,
     )

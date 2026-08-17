@@ -183,7 +183,8 @@ async function runBatch() {
   const totalBefore = ok.reduce((s, r) => s + r.before_issue_count, 0);
   const totalAfter = ok.reduce((s, r) => s + r.after_issue_count, 0);
   el("batch-status").textContent =
-    `Done: ${ok.length}/${ids.length} trace(s) processed, issues ${totalBefore} → ${totalAfter}.` +
+    `Done: ${ok.length}/${ids.length} trace(s) processed, issues ${totalBefore} → ${totalAfter}. ` +
+    `Corrected files written to output/adma/ADMA/… and output/annotations/Annotations/….` +
     (failed.length ? ` ${failed.length} failed: ${failed.map((f) => f.trace_id).join(", ")}` : "");
   setStatus(el("batch-status").textContent);
 
