@@ -20,8 +20,13 @@ import math
 from xml.dom import minidom
 from xml.etree.ElementTree import Element, SubElement, tostring
 
+from typing import TYPE_CHECKING
+
 from trace_fixer.export.road_geometry import RoadGeometryPlan, build_road_geometry_plan
 from trace_fixer.models import Trace
+
+if TYPE_CHECKING:
+    from trace_fixer.export.map_enrichment import MapEnrichmentResult
 
 # Below this curvature, a segment renders as <line/> rather than <arc/> --
 # avoids emitting a technically-nonzero but meaningless curvature value for
@@ -102,17 +107,20 @@ def _emit_objects(road: Element, plan: RoadGeometryPlan) -> None:
         )
 
 
-def generate_opendrive(trace: Trace, road_name: str = "trace_fixer_road") -> str:
-    plan = build_road_geometry_plan(trace)
+def generate_opendrive(
+    trace: Trace, road_name: str = "trace_fixer_road", enrichment: "MapEnrichmentResult | None" = None
+) -> str:
+    plan = build_road_geometry_plan(trace, enrichment=enrichment)
+    name = plan.road_name or road_name  # prefer a real road name matched via online enrichment, if any
 
     odr = Element("OpenDRIVE")
     SubElement(
         odr,
         "header",
-        {"revMajor": "1", "revMinor": "6", "name": road_name, "version": "1.00", "north": "0", "south": "0", "east": "0", "west": "0"},
+        {"revMajor": "1", "revMinor": "6", "name": name, "version": "1.00", "north": "0", "south": "0", "east": "0", "west": "0"},
     )
 
-    road = SubElement(odr, "road", {"name": road_name, "length": f"{plan.total_length:.3f}", "id": "1", "junction": "-1"})
+    road = SubElement(odr, "road", {"name": name, "length": f"{plan.total_length:.3f}", "id": "1", "junction": "-1"})
     plan_view = SubElement(road, "planView")
     _emit_plan_view(plan_view, plan)
 

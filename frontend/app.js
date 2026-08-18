@@ -47,7 +47,13 @@ async function runExport(label, path) {
   setStatus(`Exporting ${label}…`);
   try {
     const data = await apiGet(path);
-    setStatus(`Saved ${label} to ${data.output_path}`);
+    let msg = `Saved ${label} to ${data.output_path}`;
+    if (data.enrichment_requested) {
+      msg += data.enrichment
+        ? ` (enriched with ${data.enrichment})`
+        : ` (${data.enrichment_requested} enrichment unavailable, used offline data)`;
+    }
+    setStatus(msg);
   } catch (err) {
     setStatus(`Export failed: ${err.message}`);
   }
@@ -916,9 +922,10 @@ function wireControls() {
   el("export-annotation").addEventListener("click", () =>
     runExport("annotation", `/api/traces/${state.traceId}/export/annotation`)
   );
-  el("export-scenario").addEventListener("click", () =>
-    runExport("scenario", `/api/traces/${state.traceId}/export/scenario`)
-  );
+  el("export-scenario").addEventListener("click", () => {
+    const enrich = el("export-enrich-osm").checked ? "?enrich=osm" : "";
+    runExport("scenario", `/api/traces/${state.traceId}/export/scenario${enrich}`);
+  });
   el("export-report-txt").addEventListener("click", () =>
     runExport("trace summary", `/api/traces/${state.traceId}/export/report?format=txt`)
   );

@@ -165,3 +165,56 @@ def test_static_object_type_mapping_preserves_original_label():
 
     assert STATIC_OBJECT_TYPE_MAP["Traffic Sign"] != ""
     assert DEFAULT_STATIC_OBJECT_TYPE  # a real fallback value, not empty
+
+
+def _matching_enrichment(trace, tags):
+    """A synthetic enrichment result whose one way is built directly from
+    the trace's own GPS path, so it's guaranteed to match."""
+    from trace_fixer.export.map_enrichment import BBox, MapEnrichmentResult, MapWay
+
+    points = [(p.lat_deg, p.lon_deg) for p in trace.ego.poses[::200]]
+    way = MapWay(id=1, points=points, tags=tags)
+    return MapEnrichmentResult(provider="osm", bbox=BBox(0, 0, 0, 0), ways=[way])
+
+
+def test_build_road_geometry_plan_without_enrichment_is_unaffected(sample1):
+    """The default (no enrichment argument) must produce exactly the same
+    plan as before enrichment support existed -- this is the "online mode
+    never touches anything unless explicitly requested" guarantee."""
+    from trace_fixer.export.road_geometry import build_road_geometry_plan
+
+    plan = build_road_geometry_plan(sample1)
+    assert plan.road_name is None
+
+
+def test_matching_enrichment_sets_road_name_and_lanes_hint(sample1):
+    from trace_fixer.export.road_geometry import build_road_geometry_plan
+
+    enrichment = _matching_enrichment(sample1, {"name": "Test Highway", "lanes": "2"})
+    plan = build_road_geometry_plan(sample1, enrichment=enrichment)
+    assert plan.road_name == "Test Highway"
+    # every "default" section (no trustworthy annotation estimate) should
+    # now be sourced from the OSM hint rather than the blind majority guess
+    assert any(s.source == "osm_default" for s in plan.lane_sections)
+
+
+def test_unrelated_enrichment_way_is_not_matched(sample1):
+    """A way nowhere near the trace's own GPS path (a different city, say)
+    must not be treated as "this road" just because it was returned in
+    some bounding-box query."""
+    from trace_fixer.export.map_enrichment import BBox, MapEnrichmentResult, MapWay
+    from trace_fixer.export.road_geometry import build_road_geometry_plan
+
+    far_away_way = MapWay(id=99, points=[(40.7128, -74.0060), (40.72, -74.01)], tags={"name": "Somewhere Else"})
+    enrichment = MapEnrichmentResult(provider="osm", bbox=BBox(0, 0, 0, 0), ways=[far_away_way])
+    plan = build_road_geometry_plan(sample1, enrichment=enrichment)
+    assert plan.road_name is None
+
+
+def test_lanes_hint_out_of_bounds_falls_back_to_annotation_majority(sample1):
+    from trace_fixer.export.road_geometry import build_road_geometry_plan
+
+    enrichment = _matching_enrichment(sample1, {"name": "Weird Road", "lanes": "99"})
+    plan = build_road_geometry_plan(sample1, enrichment=enrichment)
+    assert plan.road_name == "Weird Road"
+    assert all(s.num_lanes != 99 for s in plan.lane_sections)

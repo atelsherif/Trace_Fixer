@@ -318,3 +318,31 @@ def test_scan_registers_identity_rows_in_catalog(client_with_corpus):
     assert data["total"] == 3
     assert {row["trace_id"] for row in data["rows"]} == set(names)
     assert all(row["processed_at"] is None for row in data["rows"])
+
+
+def test_export_scenario_without_enrich_param_is_unaffected(client_with_corpus):
+    client, names, _output_dir = client_with_corpus
+    r = client.get(f"/api/traces/{names[0]}/export/scenario")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["enrichment"] is None
+    assert data["enrichment_requested"] is None
+
+
+def test_export_scenario_enrich_falls_back_gracefully_on_failure(client_with_corpus, monkeypatch):
+    """No real network call: simulate the provider failing, and confirm
+    the export still succeeds (falls back to the offline result) rather
+    than erroring -- the whole point of fetch_enrichment's contract."""
+    import trace_fixer.export.map_enrichment as map_enrichment
+
+    def boom(*a, **kw):
+        raise ConnectionError("simulated network failure")
+
+    monkeypatch.setattr(map_enrichment.OSMOverpassProvider, "fetch", boom)
+
+    client, names, _output_dir = client_with_corpus
+    r = client.get(f"/api/traces/{names[0]}/export/scenario", params={"enrich": "osm"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["enrichment"] is None
+    assert data["enrichment_requested"] == "osm"

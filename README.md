@@ -104,7 +104,9 @@ the "do something about it" side — validate, predict, fix, and export.
    OpenDRIVE + OpenSCENARIO `.zip`, or a **trace summary** (`.txt` or
    `.xml`) — see *Trace summary report* below. Every export writes into
    `output/` and never triggers a browser download — see *Output directory*
-   below.
+   below. The **Enrich with OpenStreetMap (online)** checkbox next to the
+   OpenSCENARIO/OpenDRIVE button is optional and off by default — see
+   *Online map enrichment* below for what it does and doesn't affect.
 
 "Reset trace" reloads the original files from disk, discarding all fixes/
 predictions/offset changes made in the session.
@@ -320,6 +322,9 @@ backend/trace_fixer/
                                static-object placement) -- see "OpenDRIVE
                                generation" below
   export/opendrive.py         serializes road_geometry's plan to .xodr
+  export/map_enrichment.py    optional, opt-in online road lookup (OSM
+                               today) behind a swappable provider interface
+                               -- see "Online map enrichment" below
   export/openscenario.py      OpenSCENARIO FollowTrajectoryAction replay
   export/report.py            trace summary export (txt / xml): scene
                                composition, braking/overtake events, issues
@@ -536,11 +541,56 @@ differently:
   fuller implementation would need ASAM's `<signals>` element with a real
   country-specific sign-code catalog instead.
 
+### Online map enrichment (optional)
+
+Everything above works entirely offline, using only the trace's own data —
+that's still the default. Checking **Enrich with OpenStreetMap (online)**
+next to the OpenSCENARIO/OpenDRIVE export button (or passing `?enrich=osm`
+to the export endpoint directly) additionally looks up the trace's road on
+[OpenStreetMap](https://www.openstreetmap.org) via the public Overpass API
+before generating the file:
+
+- The matched way's `name`/`ref` tag becomes the road's name in the
+  generated `.xodr`, instead of the generic default.
+- Its `lanes` tag becomes a fallback lane count for any stretch where the
+  annotation itself has no trustworthy estimate — used exactly like the
+  existing constant-lane-count fallback (see *OpenDRIVE generation*
+  above), just a better-informed guess than a blind default when it's
+  available. It never overrides a real annotation-derived estimate.
+- Matching is a lightweight nearest-way comparison (which of the roads
+  returned for the trace's GPS bounding box does the ego's own path
+  actually run alongside), not full map-matching — good enough to pick
+  "this highway" out of whatever else the query returned, not perfect in
+  dense road networks.
+
+**This has no effect on the live visualization or interactive GUI
+performance.** It's wired into exactly one place — the scenario export
+endpoint — behind an off-by-default opt-in; nothing under normal use
+(loading a trace, playback, validation, fixing) calls it, ever. A slow or
+unavailable network never breaks an export either: any failure (offline,
+timeout, DNS, a malformed response) is caught and logged, and the export
+falls back to the exact offline result silently. Successful lookups are
+cached to disk (`output/map_cache/`, keyed by the trace's rounded GPS
+bounding box) so re-exporting the same trace or corpus doesn't re-query
+Overpass every time — both for your own performance and because Overpass
+is shared public infrastructure with fair-use expectations.
+
+OpenStreetMap has no lane-level boundary geometry (see the map-provider
+comparison this was designed around, further up this file) — this
+integration is scoped to what OSM actually has: road identity and coarse
+attributes, not curb-level geometry. It's deliberately built behind a
+small provider interface (`export/map_enrichment.py`'s
+`MapEnrichmentProvider`) specifically so a HERE-backed provider (if the
+richer HD Live Map product turns out to be available) can be added later
+as a second implementation of that same interface, without changing
+`road_geometry.py`, `opendrive.py`, or the API/GUI wiring at all.
+
 ## Known limitations / scope (v1)
 
-- **OpenDRIVE is intentionally limited to what the trace itself can support**
-  — no map provider, real lane-level geometry where the annotation
-  supports it, a sane fallback where it doesn't. See *OpenDRIVE generation*
+- **OpenDRIVE defaults to using only the trace itself** — a real map
+  provider (OpenStreetMap today) is opt-in, not required: real lane-level
+  geometry where the annotation supports it, a sane fallback where it
+  doesn't. See *OpenDRIVE generation*
   below for how. Still not a replacement for a real HD map: the reference
   line runs along the ego's own driven path rather than precisely through
   the road's true center, and curvature is a sequence of constant-curvature

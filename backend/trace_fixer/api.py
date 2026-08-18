@@ -19,6 +19,7 @@ from trace_fixer.export.batch_output import (
     scenario_output_paths,
     write_batch_output,
 )
+from trace_fixer.export.map_enrichment import fetch_enrichment
 from trace_fixer.export.opendrive import generate_opendrive
 from trace_fixer.export.openscenario import generate_openscenario
 from trace_fixer.export.report import generate_txt_report, generate_xml_report
@@ -421,14 +422,27 @@ def export_annotation(trace_id: str, include_predictions: bool = True):
 
 
 @app.get("/api/traces/{trace_id}/export/scenario")
-def export_scenario(trace_id: str):
+def export_scenario(trace_id: str, enrich: str | None = None):
+    """`enrich` is opt-in and off by default (None): pass e.g. "osm" to look
+    up the trace's road on OpenStreetMap first (road name, and a lane-count
+    hint used only where the annotation itself gives no trustworthy
+    estimate -- see export.road_geometry). A failed/unavailable lookup
+    never fails the export; it just falls back to the offline result, same
+    as if `enrich` had been omitted -- see export.map_enrichment.
+    """
     trace = _get_trace_or_404(trace_id)
+    enrichment = None
+    if enrich:
+        enrichment = fetch_enrichment(trace, enrich, cache_dir=OUTPUT_DIR / "map_cache")
+
     xodr_path, xosc_path = scenario_output_paths(trace_id, OUTPUT_DIR)
-    xodr_path.write_text(generate_opendrive(trace))
+    xodr_path.write_text(generate_opendrive(trace, enrichment=enrichment))
     xosc_path.write_text(generate_openscenario(trace, xodr_path.name))
     return {
         "output_path": _relative_output_path(xodr_path.parent),
         "files": [_relative_output_path(xodr_path), _relative_output_path(xosc_path)],
+        "enrichment": enrichment.provider if enrichment else None,
+        "enrichment_requested": enrich,
     }
 
 

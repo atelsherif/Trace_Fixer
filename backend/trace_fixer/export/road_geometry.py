@@ -30,9 +30,18 @@ from __future__ import annotations
 import bisect
 import math
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
-from trace_fixer.geo.transform import global_to_ego_relative, heading_to_yaw_rad
+from trace_fixer.geo.transform import global_to_ego_relative, heading_to_yaw_rad, latlon_to_local
 from trace_fixer.models import Trace
+
+if TYPE_CHECKING:
+    from trace_fixer.export.map_enrichment import MapEnrichmentResult, MapWay
+
+# How close (meters) the ego path must run to an OpenStreetMap way, on
+# average, to treat it as "this is the road we're on" rather than an
+# unrelated nearby one (a service road, a parallel street).
+MAX_WAY_MATCH_DISTANCE_M = 20.0
 
 MIN_SEGMENT_LEN_M = 5.0
 
@@ -98,7 +107,7 @@ class LaneSectionPlan:
     s_start: float
     num_lanes: int
     lane_widths_m: list[float]  # one per lane, index 0 = the lane nearest the reference line
-    source: str  # "annotation" | "default" -- for transparency/debugging
+    source: str  # "annotation" | "osm_default" | "default" -- for transparency/debugging
 
 
 @dataclass
@@ -119,6 +128,10 @@ class RoadGeometryPlan:
     total_length: float
     lane_sections: list[LaneSectionPlan]
     static_objects: list[StaticObjectPlacement] = field(default_factory=list)
+    # Only set when online map enrichment (see map_enrichment.py) was
+    # requested *and* found a matching road; None means "use the caller's
+    # own default" -- this plan never requires enrichment to be usable.
+    road_name: str | None = None
 
 
 def build_reference_polyline(trace: Trace, min_segment_len_m: float = MIN_SEGMENT_LEN_M) -> list[RefPoint]:
@@ -190,7 +203,20 @@ def _cluster_boundaries(t_values: list[float]) -> list[float]:
     return [c[len(c) // 2] for c in clusters]
 
 
-def _default_section(s_start: float, trace: Trace) -> LaneSectionPlan:
+def _default_section(s_start: float, trace: Trace, lanes_hint: int | None = None) -> LaneSectionPlan:
+    """The fallback used wherever the annotation-derived estimate isn't
+    trustworthy. `lanes_hint` -- a matched OpenStreetMap way's `lanes` tag,
+    when online enrichment found one (see map_enrichment.py) -- is a
+    *better-than-nothing* blind guess for the road's overall lane count
+    when it's within sane bounds, since it's independent, real map data
+    rather than this trace's own sparse frame_meta majority. It's still
+    just a fallback: a real per-window annotation-derived estimate always
+    wins over it (see estimate_lane_sections).
+    """
+    if lanes_hint is not None and MIN_LANES <= lanes_hint <= MAX_LANES:
+        return LaneSectionPlan(
+            s_start=s_start, num_lanes=lanes_hint, lane_widths_m=[DEFAULT_LANE_WIDTH_M] * lanes_hint, source="osm_default"
+        )
     n = _majority_num_lanes(trace)
     return LaneSectionPlan(s_start=s_start, num_lanes=n, lane_widths_m=[DEFAULT_LANE_WIDTH_M] * n, source="default")
 
@@ -277,9 +303,11 @@ def _frame_meta_num_lanes_by_window(trace: Trace, ref_points: list[RefPoint]) ->
     return {w: max(counts, key=lambda k: counts[k]) for w, counts in votes.items()}
 
 
-def estimate_lane_sections(trace: Trace, ref_points: list[RefPoint]) -> list[LaneSectionPlan]:
+def estimate_lane_sections(
+    trace: Trace, ref_points: list[RefPoint], lanes_hint: int | None = None
+) -> list[LaneSectionPlan]:
     if not ref_points:
-        return [_default_section(0.0, trace)]
+        return [_default_section(0.0, trace, lanes_hint)]
     total_len = ref_points[-1].s
 
     marking_by_window: dict[int, list[float]] = {}
@@ -301,7 +329,7 @@ def estimate_lane_sections(trace: Trace, ref_points: list[RefPoint]) -> list[Lan
     raw: list[LaneSectionPlan] = []
     for w in range(n_windows):
         plan = _estimate_window(marking_by_window.get(w, []), vehicles_by_window.get(w, []), declared_by_window.get(w))
-        raw.append(plan or _default_section(w * WINDOW_LEN_M, trace))
+        raw.append(plan or _default_section(w * WINDOW_LEN_M, trace, lanes_hint))
         raw[-1].s_start = w * WINDOW_LEN_M
 
     # Persistence filter: a window that differs from both neighbors and
@@ -361,13 +389,43 @@ def aggregate_static_objects(trace: Trace, ref_points: list[RefPoint]) -> list[S
     return placements
 
 
-def build_road_geometry_plan(trace: Trace) -> RoadGeometryPlan:
+def _match_way(trace: Trace, ref_points: list[RefPoint], enrichment: "MapEnrichmentResult") -> "MapWay | None":
+    """Which (if any) enrichment way the ego is actually driving along --
+    a lightweight nearest-way match, not full map-matching: convert each
+    way's lat/lon into the same local frame as the trace, then compare
+    average distance from a bounded sample of reference points to each
+    way's nearest point. Good enough to pick "this highway" out of
+    whatever else the bounding-box query returned (service roads, parallel
+    streets); returns None if nothing comes close enough to trust.
+    """
+    if not enrichment.ways:
+        return None
+    lat0, lon0 = trace.ego.poses[0].lat_deg, trace.ego.poses[0].lon_deg
+    sample = ref_points[:: max(1, len(ref_points) // 30)]
+    best_way, best_avg = None, math.inf
+    for way in enrichment.ways:
+        way_xy = [latlon_to_local(lat, lon, lat0, lon0) for lat, lon in way.points]
+        if not way_xy:
+            continue
+        total = sum(min(math.hypot(rp.x - wx, rp.y - wy) for wx, wy in way_xy) for rp in sample)
+        avg = total / len(sample)
+        if avg < best_avg:
+            best_avg, best_way = avg, way
+    return best_way if best_avg <= MAX_WAY_MATCH_DISTANCE_M else None
+
+
+def build_road_geometry_plan(trace: Trace, enrichment: "MapEnrichmentResult | None" = None) -> RoadGeometryPlan:
     ref_points = build_reference_polyline(trace)
     if len(ref_points) < 2:
         raise ValueError("Ego path too short to build a road")
+
+    matched_way = _match_way(trace, ref_points, enrichment) if enrichment else None
+    lanes_hint = matched_way.lanes if matched_way else None
+
     return RoadGeometryPlan(
         ref_points=ref_points,
         total_length=ref_points[-1].s,
-        lane_sections=estimate_lane_sections(trace, ref_points),
+        lane_sections=estimate_lane_sections(trace, ref_points, lanes_hint),
         static_objects=aggregate_static_objects(trace, ref_points),
+        road_name=matched_way.name if matched_way else None,
     )
