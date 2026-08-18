@@ -56,6 +56,31 @@ def test_scene_json_builds(trace):
     assert scene["ego"]["path"]
 
 
+def test_scene_json_ego_path_has_gps_coordinates(trace):
+    from trace_fixer.scene import build_scene_json
+
+    scene = build_scene_json(trace)
+    first = scene["ego"]["path"][0]
+    assert -90 <= first["lat"] <= 90
+    assert -180 <= first["lon"] <= 180
+
+
+def test_scene_json_events_match_sample1s_known_phenomena(trace):
+    """sample1 has one near-miss/cut-in (vehicle 2) and three overtakes
+    (vehicles 1, 4, 5) -- see test_analysis.py -- confirm the scene JSON
+    surfaces the same events, sorted by time, with vehicle ids attached."""
+    from trace_fixer.scene import build_scene_json
+
+    scene = build_scene_json(trace)
+    events = scene["events"]
+    assert [e["t_start_s"] for e in events] == sorted(e["t_start_s"] for e in events)
+
+    types = {e["type"] for e in events}
+    assert {"near_miss", "cut_in", "overtake"} <= types
+    assert all(e["vehicle_id"] == 2 for e in events if e["type"] in ("near_miss", "cut_in"))
+    assert {e["vehicle_id"] for e in events if e["type"] == "overtake"} == {1, 4, 5}
+
+
 def test_validation_finds_known_issues(trace2):
     from trace_fixer.validation.checks import run_validation
 

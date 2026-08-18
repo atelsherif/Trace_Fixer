@@ -62,25 +62,34 @@ python3 -m pytest
    the time range it's observed over). Click a vehicle to jump the timeline
    to its first observation, highlight it in the viewport with the same
    blue selection ring used for issue clicks, resume playback, and keep the
-   camera centered on it as it moves.
-3. **Run validation** to flag implausible vehicle motion, collisions, and
+   camera centered on it as it moves. Click the same vehicle again to
+   deselect it — the ring disappears and the camera goes back to following
+   the ego.
+3. **Events panel** lists the behavioral events detected in the trace —
+   braking, overtakes, short-headway/near-miss, cut-ins, standstills, sharp
+   turns; see *Trace catalog* below for what each one means. Click one to
+   jump the timeline to it and highlight the vehicle involved (or the ego,
+   for an ego-only event like braking or a standstill). This is a different
+   list from Issues below: events are "what happened," issues are "what's
+   wrong."
+4. **Run validation** to flag implausible vehicle motion, collisions, and
    off-road excursions in the issue list. Click an issue to jump the
    timeline to it and highlight the vehicle.
-4. **Predict outside FOV** extrapolates a plausible path for any vehicle
+5. **Predict outside FOV** extrapolates a plausible path for any vehicle
    before it entered the ~120° front-bumper Lidar cone (already moving when
    first observed) *and* after it left the cone (most commonly the ego
    overtaking it, or it overtaking the ego, while it's presumably still on
    the road). Predicted segments render dashed/purple and are excluded from
    export unless you ask for them (`include_predictions` on the annotation
    export).
-5. **Apply fixes** smooths flagged vehicle tracks, clamps positions back
+6. **Apply fixes** smooths flagged vehicle tracks, clamps positions back
    inside the annotated road corridor, and drops trailing observations that
    still overlap the ego vehicle after smoothing (a common "lost the track
    right as it merged into our lane" artifact). Re-run validation any time
    to see what's left.
-6. **Sync offset** nudges the annotation clock against the ADMA clock (see
+7. **Sync offset** nudges the annotation clock against the ADMA clock (see
    *Time alignment* below) — drag while watching the replay.
-7. **Export** the fixed ADMA CSV, fixed annotation XML, an
+8. **Export** the fixed ADMA CSV, fixed annotation XML, an
    OpenDRIVE + OpenSCENARIO `.zip`, or a **trace summary** (`.txt` or
    `.xml`) — see *Trace summary report* below. Every export writes into
    `output/` and never triggers a browser download — see *Output directory*
@@ -103,7 +112,13 @@ camera centered back on the ego vehicle (step back/forward still just pause
 at the new time, for frame-by-frame inspection). Clicking a vehicle in the
 **Vehicles** panel does the same but keeps the camera centered on that
 vehicle instead of the ego, for as long as it's in view — manually panning,
-zooming, or hitting recenter (⊕) drops back to following the ego.
+zooming, or hitting recenter (⊕) drops back to following the ego. Clicking
+the same vehicle again in the Vehicles panel deselects it and hands the
+camera back to the ego, the same as recenter.
+
+A small readout in the bottom-left corner of the viewport shows the ego's
+live GPS coordinates (lat, lon) as the trace plays; click it to copy them
+to the clipboard.
 
 ### Bulk directory scanning
 

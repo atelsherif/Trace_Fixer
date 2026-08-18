@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
+from trace_fixer.analysis import build_trace_summary
 from trace_fixer.geo.populate import populate_global_coords
 from trace_fixer.models import Trace
 from trace_fixer.parsers.adma_csv import parse_adma_csv
@@ -29,6 +30,97 @@ def _downsample(seq: list, max_points: int) -> list:
     return seq[::step]
 
 
+_OVERTAKE_LABELS = {
+    "vehicle_overtakes_ego": "Vehicle overtakes ego",
+    "ego_overtakes_vehicle": "Ego overtakes vehicle",
+}
+
+
+def _build_events(trace: Trace, t0: int) -> list[dict]:
+    """Behavioral events for the GUI's Events panel -- distinct from
+    trace.issues (data-quality problems): these are "what happened" rather
+    than "what's wrong," computed fresh from the trace's current state
+    (so re-running after a fix/predict reflects the corrected trace), same
+    detectors that feed the trace summary report and catalog phenomena.
+    """
+    summary = build_trace_summary(trace)
+
+    def rel_s(t_us: int) -> float:
+        return (t_us - t0) / 1e6
+
+    events: list[dict] = []
+    for i, ev in enumerate(summary.braking_events):
+        events.append(
+            {
+                "event_id": f"braking-{i}",
+                "type": "braking",
+                "vehicle_id": None,
+                "t_start_s": rel_s(ev.t_start_us),
+                "t_end_s": rel_s(ev.t_end_us),
+                "description": f"{ev.severity.capitalize()} braking (peak {ev.peak_decel_mps2:.1f} m/s²)",
+            }
+        )
+    for i, ev in enumerate(summary.overtake_events):
+        events.append(
+            {
+                "event_id": f"overtake-{i}",
+                "type": "overtake",
+                "vehicle_id": ev.vehicle_id,
+                "t_start_s": rel_s(ev.t_us),
+                "t_end_s": rel_s(ev.t_us),
+                "description": f"{_OVERTAKE_LABELS[ev.direction]} (vehicle {ev.vehicle_id})",
+            }
+        )
+    for i, ev in enumerate(summary.short_headway_events):
+        label = "Near miss" if ev.near_miss else "Short headway"
+        events.append(
+            {
+                "event_id": f"headway-{i}",
+                "type": "near_miss" if ev.near_miss else "short_headway",
+                "vehicle_id": ev.vehicle_id,
+                "t_start_s": rel_s(ev.t_start_us),
+                "t_end_s": rel_s(ev.t_end_us),
+                "description": f"{label}: vehicle {ev.vehicle_id}, {ev.min_headway_s:.2f}s gap",
+            }
+        )
+    for i, ev in enumerate(summary.cut_in_events):
+        events.append(
+            {
+                "event_id": f"cutin-{i}",
+                "type": "cut_in",
+                "vehicle_id": ev.vehicle_id,
+                "t_start_s": rel_s(ev.t_us),
+                "t_end_s": rel_s(ev.t_us),
+                "description": f"Vehicle {ev.vehicle_id} cuts in, {ev.range_m:.0f} m ahead",
+            }
+        )
+    for i, ev in enumerate(summary.standstill_events):
+        events.append(
+            {
+                "event_id": f"standstill-{i}",
+                "type": "standstill",
+                "vehicle_id": None,
+                "t_start_s": rel_s(ev.t_start_us),
+                "t_end_s": rel_s(ev.t_end_us),
+                "description": f"Ego standstill ({rel_s(ev.t_end_us) - rel_s(ev.t_start_us):.1f}s)",
+            }
+        )
+    for i, ev in enumerate(summary.sharp_turn_events):
+        events.append(
+            {
+                "event_id": f"turn-{i}",
+                "type": "sharp_turn",
+                "vehicle_id": None,
+                "t_start_s": rel_s(ev.t_start_us),
+                "t_end_s": rel_s(ev.t_end_us),
+                "description": f"Sharp turn ({ev.heading_change_deg:+.0f}°)",
+            }
+        )
+
+    events.sort(key=lambda e: e["t_start_s"])
+    return events
+
+
 def build_scene_json(trace: Trace, max_ego_points: int = 1500) -> dict:
     t0 = trace.ego.t0_us
 
@@ -41,6 +133,8 @@ def build_scene_json(trace: Trace, max_ego_points: int = 1500) -> dict:
                 "y": pose.y_m,
                 "heading_deg": (90 + pose.heading_deg) % 360,
                 "speed_mps": math.hypot(pose.vx_mps, pose.vy_mps),
+                "lat": pose.lat_deg,
+                "lon": pose.lon_deg,
             }
         )
 
@@ -105,6 +199,7 @@ def build_scene_json(trace: Trace, max_ego_points: int = 1500) -> dict:
     duration_s = (trace.ego.t1_us - trace.ego.t0_us) / 1e6
 
     return {
+        "events": _build_events(trace, t0),
         "trace_id": trace.trace_id,
         "duration_s": duration_s,
         "ego": {"length": EGO_LENGTH_M, "width": EGO_WIDTH_M, "path": ego_path},

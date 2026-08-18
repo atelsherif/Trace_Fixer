@@ -99,6 +99,9 @@
           <span><i class="swatch flagged"></i>Flagged</span>
         </div>
       </div>
+      <button id="gps-readout" class="gps-readout" title="Click to copy ego GPS coordinates">
+        <span id="gps-readout-text">Lat —, Lon —</span>
+      </button>
     </section>
 
     <aside class="side-panel">
@@ -124,6 +127,11 @@
       <div class="panel-block">
         <h2>Vehicles <span id="vehicle-count" class="badge">0</span></h2>
         <ul id="vehicle-list" class="issue-list vehicle-list"></ul>
+      </div>
+
+      <div class="panel-block">
+        <h2>Events <span id="event-count" class="badge">0</span></h2>
+        <ul id="event-list" class="issue-list event-list"></ul>
       </div>
 
       <div class="panel-block issues-block">

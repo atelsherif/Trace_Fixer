@@ -221,6 +221,7 @@ function applyScene(scene) {
   if (state.timeS > scene.duration_s) state.timeS = 0;
   renderIssueList();
   renderVehicleList();
+  renderEventList();
   updateTimeLabel();
 }
 
@@ -257,6 +258,8 @@ function egoAt(t) {
     y: a.y + (b.y - a.y) * f,
     heading_deg: lerpHeadingDeg(a.heading_deg, b.heading_deg, f),
     speed_mps: a.speed_mps + (b.speed_mps - a.speed_mps) * f,
+    lat: a.lat + (b.lat - a.lat) * f,
+    lon: a.lon + (b.lon - a.lon) * f,
   }));
 }
 
@@ -307,6 +310,7 @@ function draw() {
   if (!state.scene) return;
 
   const ego = egoAt(state.timeS);
+  updateGpsReadout(ego);
   if (state.camera.followVehicleId != null) {
     const followed = state.scene.vehicles.find((v) => v.id === state.camera.followVehicleId);
     const v = followed ? vehicleAt(followed, state.timeS) : null;
@@ -422,6 +426,37 @@ function drawBox(ctx, x, y, headingDeg, length, width, opts) {
   ctx.restore();
 }
 
+// ---------- GPS readout ----------
+
+let lastGpsText = "";
+
+function updateGpsReadout(ego) {
+  if (!ego) return;
+  lastGpsText = `${ego.lat.toFixed(6)}, ${ego.lon.toFixed(6)}`;
+  if (el("gps-readout").classList.contains("copied")) return; // "Copied: ..." feedback showing -- don't stomp it
+  el("gps-readout-text").textContent = `Lat ${ego.lat.toFixed(6)}, Lon ${ego.lon.toFixed(6)}`;
+}
+
+let copyFeedbackTimeout = null;
+
+async function copyGpsReadout() {
+  if (!lastGpsText) return;
+  try {
+    await navigator.clipboard.writeText(lastGpsText);
+  } catch {
+    return; // clipboard access denied/unavailable -- fail silently, nothing else to do
+  }
+  const btn = el("gps-readout");
+  btn.classList.add("copied");
+  el("gps-readout-text").textContent = `Copied: ${lastGpsText}`;
+  clearTimeout(copyFeedbackTimeout);
+  // the next animation frame's updateGpsReadout() call naturally restores
+  // the live text once "copied" no longer needs to be shown -- no need to
+  // remember/restore the old text here, and it'd be stale if we did (the
+  // trace may have kept playing while the feedback was showing).
+  copyFeedbackTimeout = setTimeout(() => btn.classList.remove("copied"), 1200);
+}
+
 // ---------- Issue list ----------
 
 function renderIssueList() {
@@ -450,6 +485,7 @@ function renderIssueList() {
       state.timeS = Math.max(0, issue.t_start_s);
       state.selectedVehicleId = issue.vehicle_id;
       state.camera.followEgo = issue.vehicle_id == null;
+      state.camera.followVehicleId = null;
       setPlaying(false);
       updateTimeLabel();
       renderVehicleList();
@@ -487,11 +523,57 @@ function renderVehicleList() {
     li.appendChild(meta);
     li.appendChild(desc);
     li.addEventListener("click", () => {
-      state.selectedVehicleId = vehicle.id;
-      state.camera.followEgo = false;
-      state.camera.followVehicleId = vehicle.id;
-      if (obs.length) state.timeS = Math.max(0, obs[0].t_s);
-      setPlaying(true);
+      if (state.selectedVehicleId === vehicle.id) {
+        // clicking the already-selected vehicle again deselects it and
+        // hands the camera back to following the ego
+        state.selectedVehicleId = null;
+        state.camera.followVehicleId = null;
+        state.camera.followEgo = true;
+      } else {
+        state.selectedVehicleId = vehicle.id;
+        state.camera.followEgo = false;
+        state.camera.followVehicleId = vehicle.id;
+        if (obs.length) state.timeS = Math.max(0, obs[0].t_s);
+        setPlaying(true);
+      }
+      updateTimeLabel();
+      renderVehicleList();
+      draw();
+    });
+    list.appendChild(li);
+  }
+}
+
+// ---------- Event list ----------
+
+function renderEventList() {
+  const list = el("event-list");
+  list.innerHTML = "";
+  const events = state.scene.events;
+  el("event-count").textContent = events.length;
+  if (!events.length) {
+    const li = document.createElement("li");
+    li.className = "issue-empty";
+    li.textContent = "No notable events detected in this trace.";
+    list.appendChild(li);
+    return;
+  }
+  for (const event of events) {
+    const li = document.createElement("li");
+    li.className = "issue-item event-item";
+    const meta = document.createElement("div");
+    meta.className = "issue-meta";
+    meta.textContent = `${humanizeTag(event.type)}${event.vehicle_id != null ? " · veh " + event.vehicle_id : " · ego"}`;
+    const desc = document.createElement("div");
+    desc.textContent = `${event.description} (t=${event.t_start_s.toFixed(1)}s)`;
+    li.appendChild(meta);
+    li.appendChild(desc);
+    li.addEventListener("click", () => {
+      state.timeS = Math.max(0, event.t_start_s);
+      state.selectedVehicleId = event.vehicle_id;
+      state.camera.followEgo = event.vehicle_id == null;
+      state.camera.followVehicleId = event.vehicle_id;
+      setPlaying(false);
       updateTimeLabel();
       renderVehicleList();
       draw();
@@ -701,6 +783,7 @@ function wireControls() {
     draw();
   });
   el("heading-up").addEventListener("change", (e) => { state.camera.headingUp = e.target.checked; draw(); });
+  el("gps-readout").addEventListener("click", copyGpsReadout);
   el("show-lanes").addEventListener("change", (e) => { state.showLanes = e.target.checked; draw(); });
   el("show-static").addEventListener("change", (e) => { state.showStatic = e.target.checked; draw(); });
 
