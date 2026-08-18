@@ -71,6 +71,25 @@ def test_osm_provider_parses_ways_and_ignores_non_way_elements(monkeypatch):
     assert way.points[0] == (34.844, -116.827)
 
 
+def test_osm_provider_sends_a_real_user_agent(monkeypatch):
+    """Regression guard: Overpass's edge layer 406s requests that don't
+    identify a real client (httpx's default User-Agent gets rejected) --
+    see OSMOverpassProvider.HEADERS."""
+    from trace_fixer.export.map_enrichment import BBox, OSMOverpassProvider
+
+    seen_headers = {}
+
+    def fake_post(*a, **kw):
+        seen_headers.update(kw.get("headers") or {})
+        return _FakeResponse(_OVERPASS_PAYLOAD)
+
+    monkeypatch.setattr("httpx.post", fake_post)
+    OSMOverpassProvider().fetch(BBox(34.8, -116.9, 34.9, -116.8), timeout=5)
+
+    assert "User-Agent" in seen_headers
+    assert "python-httpx" not in seen_headers["User-Agent"]
+
+
 def test_way_lanes_and_maxspeed_handle_missing_or_malformed_tags():
     from trace_fixer.export.map_enrichment import MapWay
 

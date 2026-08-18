@@ -123,13 +123,22 @@ class OSMOverpassProvider:
 
     name = "osm"
 
+    # Overpass's fair-use policy asks clients to identify themselves with a
+    # real User-Agent; without one (httpx's default is a generic
+    # "python-httpx/<version>") its edge layer rejects the request with a
+    # 406 rather than serving it -- not a data/query problem, purely this.
+    HEADERS = {
+        "User-Agent": "PreTwin-trace-fixer/1.0 (+https://github.com/atelsherif/Trace_Fixer)",
+        "Accept": "application/json",
+    }
+
     def fetch(self, bbox: BBox, timeout: float = DEFAULT_TIMEOUT_S) -> MapEnrichmentResult:
         query = (
             f"[out:json][timeout:{int(timeout)}];"
             f'way["highway"]({bbox.min_lat},{bbox.min_lon},{bbox.max_lat},{bbox.max_lon});'
             "out geom;"
         )
-        response = httpx.post(OVERPASS_URL, data={"data": query}, timeout=timeout)
+        response = httpx.post(OVERPASS_URL, data={"data": query}, headers=self.HEADERS, timeout=timeout)
         response.raise_for_status()
         data = response.json()
 
