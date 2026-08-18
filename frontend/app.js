@@ -8,7 +8,7 @@ const state = {
   playbackSpeed: 1,
   loop: false,
   lastFrameMs: null,
-  camera: { zoom: 8, followEgo: true, centerX: 0, centerY: 0, headingUp: true },
+  camera: { zoom: 8, followEgo: true, followVehicleId: null, centerX: 0, centerY: 0, headingUp: true },
   drag: null,
   selectedVehicleId: null,
   showLanes: true,
@@ -55,15 +55,17 @@ async function runExport(label, path) {
 
 // ---------- Trace picker (searchable, scales to large corpora) ----------
 
-async function queryTraces(q) {
-  const params = new URLSearchParams({ limit: "200" });
+const TRACE_PAGE_SIZE = 200;
+
+async function queryTraces(q, offset = 0) {
+  const params = new URLSearchParams({ limit: String(TRACE_PAGE_SIZE), offset: String(offset) });
   if (q) params.set("q", q);
   return apiGet(`/api/traces?${params.toString()}`);
 }
 
 async function initTracePicker() {
-  const data = await queryTraces("");
-  renderTraceListbox(data.trace_ids, data.total);
+  const data = await queryTraces("", 0);
+  renderTraceListbox(data.trace_ids, data.total, 0);
   if (data.trace_ids.length > 0) {
     await loadTrace(data.trace_ids[0]);
   } else {
@@ -73,10 +75,12 @@ async function initTracePicker() {
 
 let lastListedIds = [];
 let lastListedTotal = 0;
+let lastListedOffset = 0;
 
-function renderTraceListbox(ids, total) {
+function renderTraceListbox(ids, total, offset = 0) {
   lastListedIds = ids;
   lastListedTotal = total;
+  lastListedOffset = offset;
   const box = el("trace-listbox");
   box.innerHTML = "";
   if (ids.length === 0) {
@@ -112,9 +116,15 @@ function renderTraceListbox(ids, total) {
     });
     box.appendChild(item);
   }
-  const shown = ids.length;
+  const shownStart = ids.length ? offset + 1 : 0;
+  const shownEnd = offset + ids.length;
   el("trace-picker-footer").textContent =
-    total > shown ? `Showing ${shown} of ${total} traces — keep typing to narrow down.` : `${total} trace(s) available.`;
+    total > 0 ? `Showing ${shownStart}–${shownEnd} of ${total} trace(s).` : "No matching traces.";
+  const pageCount = Math.max(1, Math.ceil(total / TRACE_PAGE_SIZE));
+  const pageNum = Math.floor(offset / TRACE_PAGE_SIZE) + 1;
+  el("trace-page-label").textContent = pageCount > 1 ? `Page ${pageNum} of ${pageCount}` : "";
+  el("trace-page-prev").disabled = offset <= 0;
+  el("trace-page-next").disabled = shownEnd >= total;
 }
 
 function updateBatchControl() {
@@ -136,8 +146,8 @@ function onTraceSearchInput(value) {
   state.searchQuery = value.trim();
   clearTimeout(traceSearchDebounce);
   traceSearchDebounce = setTimeout(async () => {
-    const data = await queryTraces(state.searchQuery);
-    renderTraceListbox(data.trace_ids, data.total);
+    const data = await queryTraces(state.searchQuery, 0);
+    renderTraceListbox(data.trace_ids, data.total, 0);
   }, 150);
 }
 
@@ -147,7 +157,9 @@ async function loadTrace(traceId) {
   const scene = await apiGet(`/api/traces/${traceId}/scene`);
   applyScene(scene);
   state.timeS = 0;
+  state.selectedVehicleId = null;
   state.camera.followEgo = true;
+  state.camera.followVehicleId = null;
   setStatus(`Loaded ${traceId}: ${scene.vehicles.length} vehicles, ${scene.duration_s.toFixed(1)}s.`);
 }
 
@@ -295,7 +307,14 @@ function draw() {
   if (!state.scene) return;
 
   const ego = egoAt(state.timeS);
-  if (state.camera.followEgo && ego) {
+  if (state.camera.followVehicleId != null) {
+    const followed = state.scene.vehicles.find((v) => v.id === state.camera.followVehicleId);
+    const v = followed ? vehicleAt(followed, state.timeS) : null;
+    if (v) {
+      state.camera.centerX = v.x;
+      state.camera.centerY = v.y;
+    }
+  } else if (state.camera.followEgo && ego) {
     state.camera.centerX = ego.x;
     state.camera.centerY = ego.y;
   }
@@ -470,8 +489,9 @@ function renderVehicleList() {
     li.addEventListener("click", () => {
       state.selectedVehicleId = vehicle.id;
       state.camera.followEgo = false;
+      state.camera.followVehicleId = vehicle.id;
       if (obs.length) state.timeS = Math.max(0, obs[0].t_s);
-      setPlaying(false);
+      setPlaying(true);
       updateTimeLabel();
       renderVehicleList();
       draw();
@@ -571,14 +591,25 @@ function wireControls() {
   el("trace-prev").addEventListener("click", () => stepTrace("prev"));
   el("trace-next").addEventListener("click", () => stepTrace("next"));
 
+  el("trace-page-prev").addEventListener("click", async () => {
+    const offset = Math.max(0, lastListedOffset - TRACE_PAGE_SIZE);
+    const data = await queryTraces(state.searchQuery, offset);
+    renderTraceListbox(data.trace_ids, data.total, offset);
+  });
+  el("trace-page-next").addEventListener("click", async () => {
+    const offset = lastListedOffset + TRACE_PAGE_SIZE;
+    const data = await queryTraces(state.searchQuery, offset);
+    renderTraceListbox(data.trace_ids, data.total, offset);
+  });
+
   el("batch-select-shown").addEventListener("click", () => {
     for (const id of lastListedIds) state.selectedTraceIds.add(id);
-    renderTraceListbox(lastListedIds, lastListedTotal);
+    renderTraceListbox(lastListedIds, lastListedTotal, lastListedOffset);
     updateBatchControl();
   });
   el("batch-clear-selection").addEventListener("click", () => {
     state.selectedTraceIds.clear();
-    renderTraceListbox(lastListedIds, lastListedTotal);
+    renderTraceListbox(lastListedIds, lastListedTotal, lastListedOffset);
     updateBatchControl();
   });
   el("batch-run").addEventListener("click", runBatch);
@@ -590,6 +621,18 @@ function wireControls() {
   });
   el("scan-run").addEventListener("click", runScan);
   el("scan-path").addEventListener("keydown", (e) => { if (e.key === "Enter") runScan(); });
+
+  el("scan-browse-btn").addEventListener("click", () => {
+    const panel = el("dir-browser");
+    if (panel.classList.contains("hidden")) openDirBrowser(); else panel.classList.add("hidden");
+  });
+  el("dir-browser-select").addEventListener("click", () => {
+    if (dirBrowserPath) el("scan-path").value = dirBrowserPath;
+    el("dir-browser").classList.add("hidden");
+  });
+  el("dir-browser-cancel").addEventListener("click", () => el("dir-browser").classList.add("hidden"));
+
+  el("scan-batch-all").addEventListener("click", runBatchAll);
 
   // -- playback --
   el("play-pause").addEventListener("click", togglePlayPause);
@@ -614,7 +657,9 @@ function wireControls() {
 
   el("timeline").addEventListener("input", (e) => {
     state.timeS = parseFloat(e.target.value);
-    setPlaying(false);
+    state.camera.followEgo = true;
+    state.camera.followVehicleId = null;
+    setPlaying(true);
     updateTimeLabel();
     draw();
   });
@@ -625,7 +670,11 @@ function wireControls() {
 
   el("zoom-in").addEventListener("click", () => { state.camera.zoom *= 1.3; draw(); });
   el("zoom-out").addEventListener("click", () => { state.camera.zoom /= 1.3; draw(); });
-  el("recenter").addEventListener("click", () => { state.camera.followEgo = true; draw(); });
+  el("recenter").addEventListener("click", () => {
+    state.camera.followEgo = true;
+    state.camera.followVehicleId = null;
+    draw();
+  });
   el("heading-up").addEventListener("change", (e) => { state.camera.headingUp = e.target.checked; draw(); });
   el("show-lanes").addEventListener("change", (e) => { state.showLanes = e.target.checked; draw(); });
   el("show-static").addEventListener("change", (e) => { state.showStatic = e.target.checked; draw(); });
@@ -641,6 +690,7 @@ function wireControls() {
   c.addEventListener("mousedown", (e) => {
     state.drag = { x: e.clientX, y: e.clientY, cx: state.camera.centerX, cy: state.camera.centerY };
     state.camera.followEgo = false;
+    state.camera.followVehicleId = null;
   });
   window.addEventListener("mousemove", (e) => {
     if (!state.drag) return;
@@ -757,17 +807,104 @@ async function runScan() {
     el("scan-status").textContent =
       `Found ${data.adma_found} ADMA file(s), ${data.xml_found} annotation file(s) — ` +
       `matched ${data.matched} pair(s). ${data.total_traces} trace(s) now available.`;
-    const listing = await queryTraces("");
-    renderTraceListbox(listing.trace_ids, listing.total);
+    const listing = await queryTraces("", 0);
+    renderTraceListbox(listing.trace_ids, listing.total, 0);
   } catch (err) {
     el("scan-status").textContent = `Scan failed: ${err.message}`;
   }
+}
+
+// ---------- Directory browser (Scan directory "Browse…") ----------
+
+let dirBrowserPath = null;
+
+async function openDirBrowser() {
+  el("dir-browser").classList.remove("hidden");
+  await loadDirBrowser(el("scan-path").value.trim() || null);
+}
+
+async function loadDirBrowser(path) {
+  try {
+    const data = await apiGet(`/api/browse_dir${path ? `?path=${encodeURIComponent(path)}` : ""}`);
+    dirBrowserPath = data.path;
+    el("dir-browser-path").textContent = data.path;
+    el("dir-browser-up").disabled = !data.parent;
+    el("dir-browser-up").onclick = () => { if (data.parent) loadDirBrowser(data.parent); };
+    const list = el("dir-browser-list");
+    list.innerHTML = "";
+    if (!data.dirs.length) {
+      const empty = document.createElement("div");
+      empty.className = "dir-browser-empty";
+      empty.textContent = "No subfolders here.";
+      list.appendChild(empty);
+    }
+    for (const name of data.dirs) {
+      const item = document.createElement("div");
+      item.className = "dir-browser-item";
+      item.textContent = name;
+      item.addEventListener("click", () => loadDirBrowser(`${data.path}/${name}`));
+      list.appendChild(item);
+    }
+  } catch (err) {
+    el("dir-browser-path").textContent = `Error: ${err.message}`;
+  }
+}
+
+// ---------- Batch fix + predict ALL matched traces ----------
+
+let batchAllPolling = null;
+
+async function runBatchAll() {
+  try {
+    const r = await fetch("/api/batch/all", { method: "POST" });
+    const data = await r.json();
+    if (!r.ok) {
+      el("scan-batch-all-status").textContent = `Could not start: ${data.detail || r.status}`;
+      return;
+    }
+    el("scan-batch-all").disabled = true;
+    el("scan-batch-all-status").textContent = `Starting: 0/${data.total}…`;
+    pollBatchAllStatus();
+  } catch (err) {
+    el("scan-batch-all-status").textContent = `Could not start: ${err.message}`;
+  }
+}
+
+function pollBatchAllStatus() {
+  clearInterval(batchAllPolling);
+  batchAllPolling = setInterval(async () => {
+    const data = await apiGet("/api/batch/all/status");
+    if (!data.total) return;
+    if (data.running) {
+      el("scan-batch-all-status").textContent =
+        `Processing ${data.done}/${data.total}` +
+        (data.current ? ` (${data.current})` : "") +
+        (data.failed.length ? `, ${data.failed.length} failed so far` : "") + "…";
+      return;
+    }
+    clearInterval(batchAllPolling);
+    el("scan-batch-all").disabled = false;
+    el("scan-batch-all-status").textContent =
+      `Done: ${data.done}/${data.total} processed` +
+      (data.failed.length ? `, ${data.failed.length} failed: ${data.failed.map((f) => f.trace_id).join(", ")}` : "") +
+      `. Corrected files written to output/.`;
+  }, 700);
 }
 
 async function init() {
   resizeCanvas();
   wireControls();
   await initTracePicker();
+  try {
+    const status = await apiGet("/api/batch/all/status");
+    if (status.running) {
+      el("scan-batch-all").disabled = true;
+      el("scan-batch-all-status").textContent = `Processing ${status.done}/${status.total}…`;
+      pollBatchAllStatus();
+    }
+  } catch {
+    // best-effort resume of an in-progress batch after a page reload
+  }
   requestAnimationFrame(tick);
 }
 

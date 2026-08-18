@@ -91,6 +91,14 @@ class TraceStore:
         self._cache.pop(trace_id, None)
         return self.get(trace_id)
 
+    def evict(self, trace_id: str) -> None:
+        """Drops a trace from the in-memory parse cache without forgetting
+        it's registered -- used after a bulk-processing run writes a
+        trace's output to disk, so memory doesn't grow unbounded across a
+        corpus of thousands. A later `get()` just re-parses from disk.
+        """
+        self._cache.pop(trace_id, None)
+
     def add_from_bytes(self, name_hint: str, adma_bytes: bytes, annotation_bytes: bytes) -> str:
         trace_id = slugify(name_hint)
         base_id = trace_id

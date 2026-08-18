@@ -19,6 +19,11 @@
         <div id="trace-picker-panel" class="trace-picker-panel hidden">
           <input id="trace-search" type="text" placeholder="Search traces by name&hellip;" autocomplete="off" />
           <div id="trace-listbox" class="trace-listbox"></div>
+          <div class="trace-page-nav">
+            <button id="trace-page-prev" class="trace-nav-btn" title="Previous page">&#9664;</button>
+            <span id="trace-page-label"></span>
+            <button id="trace-page-next" class="trace-nav-btn" title="Next page">&#9654;</button>
+          </div>
           <div id="trace-picker-footer" class="trace-picker-footer"></div>
           <div class="batch-bar">
             <span id="batch-selected-count">0 selected</span>
@@ -37,9 +42,29 @@
       <div class="scan-picker">
         <button id="scan-btn" title="Scan a directory on the server for ADMA/annotation pairs">Scan directory&hellip;</button>
         <div id="scan-panel" class="scan-panel hidden">
-          <input id="scan-path" type="text" placeholder="/path/to/corpus root" autocomplete="off" />
+          <div class="scan-path-row">
+            <input id="scan-path" type="text" placeholder="/path/to/corpus root" autocomplete="off" />
+            <button id="scan-browse-btn" title="Browse for a folder on the server">Browse&hellip;</button>
+          </div>
+          <div id="dir-browser" class="dir-browser hidden">
+            <div class="dir-browser-header">
+              <button id="dir-browser-up" class="trace-nav-btn" title="Go up one level">&#8593;</button>
+              <span id="dir-browser-path" class="dir-browser-path"></span>
+            </div>
+            <div id="dir-browser-list" class="dir-browser-list"></div>
+            <div class="dir-browser-actions">
+              <button id="dir-browser-select" class="primary">Use this folder</button>
+              <button id="dir-browser-cancel">Cancel</button>
+            </div>
+          </div>
           <button id="scan-run">Scan</button>
           <p id="scan-status" class="scan-status"></p>
+          <div class="scan-batch-all">
+            <button id="scan-batch-all" title="Fix + predict every matched trace in this corpus and write results to output/">
+              Fix + predict ALL matched traces
+            </button>
+            <p id="scan-batch-all-status" class="scan-status"></p>
+          </div>
         </div>
       </div>
     </div>

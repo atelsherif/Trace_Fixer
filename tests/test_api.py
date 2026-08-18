@@ -4,6 +4,7 @@ Uses a small real corpus (copies of the bundled sample trace under a few
 different names) rather than placeholder files, since these endpoints need
 traces that actually parse.
 """
+import time
 from pathlib import Path
 
 import pytest
@@ -149,3 +150,93 @@ def test_individual_export_endpoints_write_to_output_and_report_the_path(client_
     assert report_path.exists()
     assert r.json()["output_path"] == str(report_path)
     assert "<TraceSummary" in report_path.read_text()
+
+
+def test_list_traces_paginates_and_totals_the_filtered_set(client_with_corpus):
+    client, names, _output_dir = client_with_corpus
+    sorted_names = sorted(names, key=str.lower)
+
+    r = client.get("/api/traces", params={"limit": 2, "offset": 0})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["trace_ids"] == sorted_names[:2]
+    assert data["total"] == 3
+    assert data["offset"] == 0
+
+    r = client.get("/api/traces", params={"limit": 2, "offset": 2})
+    data = r.json()
+    assert data["trace_ids"] == sorted_names[2:]
+    assert data["total"] == 3
+
+    # total reflects the *filtered* count, not the whole corpus
+    r = client.get("/api/traces", params={"q": sorted_names[0]})
+    data = r.json()
+    assert data["total"] == 1
+    assert data["trace_ids"] == [sorted_names[0]]
+
+
+def test_browse_dir_lists_subdirectories(tmp_path):
+    from fastapi.testclient import TestClient
+
+    import trace_fixer.api as api_module
+
+    (tmp_path / "alpha").mkdir()
+    (tmp_path / "beta").mkdir()
+    (tmp_path / ".hidden").mkdir()
+    (tmp_path / "not_a_dir.txt").write_text("x")
+
+    client = TestClient(api_module.app)
+    r = client.get("/api/browse_dir", params={"path": str(tmp_path)})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["path"] == str(tmp_path)
+    assert data["dirs"] == ["alpha", "beta"]  # hidden dirs and files excluded
+    assert data["parent"] == str(tmp_path.parent)
+
+
+def test_browse_dir_rejects_non_directory(tmp_path):
+    from fastapi.testclient import TestClient
+
+    import trace_fixer.api as api_module
+
+    missing = tmp_path / "does-not-exist"
+    client = TestClient(api_module.app)
+    r = client.get("/api/browse_dir", params={"path": str(missing)})
+    assert r.status_code == 400
+
+
+def test_batch_all_processes_every_registered_trace(client_with_corpus):
+    client, names, output_dir = client_with_corpus
+
+    r = client.post("/api/batch/all")
+    assert r.status_code == 200
+    assert r.json()["total"] == 3
+
+    deadline = time.time() + 10
+    status = client.get("/api/batch/all/status").json()
+    while status["running"] and time.time() < deadline:
+        time.sleep(0.1)
+        status = client.get("/api/batch/all/status").json()
+
+    assert status["running"] is False
+    assert status["done"] == 3
+    assert status["failed"] == []
+    for name in names:
+        assert (output_dir / "adma" / "ADMA" / name / "adma.csv").exists()
+        assert (output_dir / "reports" / name / f"{name}_summary.txt").exists()
+
+
+def test_batch_all_rejects_concurrent_start(client_with_corpus):
+    client, _names, _output_dir = client_with_corpus
+
+    r1 = client.post("/api/batch/all")
+    assert r1.status_code == 200
+    r2 = client.post("/api/batch/all")
+    assert r2.status_code == 409
+
+    deadline = time.time() + 10
+    status = client.get("/api/batch/all/status").json()
+    while status["running"] and time.time() < deadline:
+        time.sleep(0.1)
+        status = client.get("/api/batch/all/status").json()
+    assert status["running"] is False

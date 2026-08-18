@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -7,6 +8,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from trace_fixer.browse import list_subdirectories
 from trace_fixer.export.adma_writer import write_adma_csv
 from trace_fixer.export.annotation_writer import write_annotation_xml
 from trace_fixer.export.batch_output import (
@@ -44,8 +46,20 @@ def _get_trace_or_404(trace_id: str):
 
 
 @app.get("/api/traces")
-def list_traces(q: str | None = None, limit: int = 200):
-    return {"trace_ids": store.list_ids(query=q, limit=limit), "total": store.count()}
+def list_traces(q: str | None = None, limit: int = 200, offset: int = 0):
+    matching = store.list_ids(query=q)  # unlimited -- filtered, so pagination math is against the real total
+    return {"trace_ids": matching[offset : offset + limit], "total": len(matching), "offset": offset}
+
+
+@app.get("/api/browse_dir")
+def browse_dir(path: str | None = None):
+    """Lists the subdirectories of `path` (or the server's home directory)
+    for the Scan directory panel's folder browser -- see browse.py.
+    """
+    try:
+        return list_subdirectories(path)
+    except NotADirectoryError:
+        raise HTTPException(status_code=400, detail=f"Not a directory (on the server running this app): {path}")
 
 
 @app.get("/api/traces/{trace_id}/neighbor")
@@ -160,21 +174,14 @@ def predict_clear(trace_id: str):
     return {"scene": build_scene_json(trace)}
 
 
-@app.post("/api/traces/{trace_id}/batch_fix_predict")
-def batch_fix_predict(trace_id: str, req: BatchFixPredictRequest = BatchFixPredictRequest()):
-    """One-shot validate -> fix -> predict -> re-validate for a single trace,
-    then writes every artifact (corrected ADMA + annotation, OpenDRIVE +
-    OpenSCENARIO, and a trace summary report) into output/, mirroring the
-    input corpus layout for ADMA/annotation -- see export.batch_output --
-    so processing many traces produces a ready-to-use output corpus in one
-    pass. No scene payload in the response -- meant to be called in a loop
-    over many trace_ids (see the GUI's multi-select "batch" action) without
-    paying for a full scene JSON build on every one.
+def _fix_predict_and_write_output(trace_id: str, req: BatchFixPredictRequest) -> dict:
+    """validate -> fix -> predict -> re-validate for one trace, then writes
+    every artifact (corrected ADMA + annotation, OpenDRIVE + OpenSCENARIO,
+    and a trace summary report) into output/, mirroring the input corpus
+    layout for ADMA/annotation -- see export.batch_output. Shared by the
+    single-trace endpoint below and the "fix + predict ALL" background job.
     """
-    try:
-        trace = store.get(trace_id)
-    except KeyError:
-        raise HTTPException(status_code=404, detail=f"Unknown trace_id '{trace_id}'")
+    trace = store.get(trace_id)
     before = run_validation(trace)
     fix_summary = apply_fixes(trace)
     added = predict_all(
@@ -206,6 +213,69 @@ def batch_fix_predict(trace_id: str, req: BatchFixPredictRequest = BatchFixPredi
         "predicted": added,
         "output": output_paths,
     }
+
+
+@app.post("/api/traces/{trace_id}/batch_fix_predict")
+def batch_fix_predict(trace_id: str, req: BatchFixPredictRequest = BatchFixPredictRequest()):
+    """No scene payload in the response -- meant to be called in a loop over
+    many trace_ids (see the GUI's multi-select "batch" action) without
+    paying for a full scene JSON build on every one.
+    """
+    try:
+        return _fix_predict_and_write_output(trace_id, req)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"Unknown trace_id '{trace_id}'")
+
+
+_batch_all_lock = threading.Lock()
+_batch_all_state: dict = {
+    "running": False,
+    "total": 0,
+    "done": 0,
+    "current": None,
+    "failed": [],
+}
+
+
+def _run_batch_all(trace_ids: list[str]) -> None:
+    req = BatchFixPredictRequest()
+    for trace_id in trace_ids:
+        with _batch_all_lock:
+            _batch_all_state["current"] = trace_id
+        try:
+            _fix_predict_and_write_output(trace_id, req)
+        except Exception as exc:  # noqa: BLE001 -- one bad trace must not stop the run
+            with _batch_all_lock:
+                _batch_all_state["failed"].append({"trace_id": trace_id, "error": str(exc)})
+        finally:
+            store.evict(trace_id)  # bounds memory across a corpus of thousands
+            with _batch_all_lock:
+                _batch_all_state["done"] += 1
+    with _batch_all_lock:
+        _batch_all_state["running"] = False
+        _batch_all_state["current"] = None
+
+
+@app.post("/api/batch/all")
+def start_batch_all():
+    """Kicks off fix + predict for *every* registered trace (not just the
+    page currently shown in the trace picker) in a background thread, and
+    returns immediately -- poll /api/batch/all/status for progress. Meant
+    for corpora too large to comfortably multi-select in the GUI.
+    """
+    with _batch_all_lock:
+        if _batch_all_state["running"]:
+            raise HTTPException(status_code=409, detail="A batch run is already in progress")
+        trace_ids = store.list_ids()
+        _batch_all_state.update(running=True, total=len(trace_ids), done=0, current=None, failed=[])
+    threading.Thread(target=_run_batch_all, args=(trace_ids,), daemon=True).start()
+    return {"started": True, "total": len(trace_ids)}
+
+
+@app.get("/api/batch/all/status")
+def batch_all_status():
+    with _batch_all_lock:
+        return dict(_batch_all_state)
 
 
 class SyncOffsetRequest(BaseModel):

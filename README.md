@@ -55,11 +55,14 @@ python3 -m pytest
    thousands (type to filter; it queries the server rather than holding
    every trace client-side). The **◀ / ▶** buttons beside it step to the
    previous/next trace in the current list — if you've typed a search
-   filter, stepping stays within those filtered results.
+   filter, stepping stays within those filtered results. The list itself
+   is paginated 200 at a time; use the **◀ / ▶** page controls below it to
+   page through a larger corpus (searching narrows the page count too).
 2. **Vehicles panel** lists every vehicle in the scene (id, object type, and
    the time range it's observed over). Click a vehicle to jump the timeline
-   to its first observation and highlight it in the viewport with the same
-   blue selection ring used for issue clicks.
+   to its first observation, highlight it in the viewport with the same
+   blue selection ring used for issue clicks, resume playback, and keep the
+   camera centered on it as it moves.
 3. **Run validation** to flag implausible vehicle motion, collisions, and
    off-road excursions in the issue list. Click an issue to jump the
    timeline to it and highlight the vehicle.
@@ -95,6 +98,13 @@ typing in a text field): **Space** play/pause, **←/→** step back/forward 1s,
 button (↻) once the timeline reaches the end, so pressing it (or Space)
 again starts over from the beginning instead of doing nothing.
 
+Dragging the timeline seeks *and* resumes playback from that point with the
+camera centered back on the ego vehicle (step back/forward still just pause
+at the new time, for frame-by-frame inspection). Clicking a vehicle in the
+**Vehicles** panel does the same but keeps the camera centered on that
+vehicle instead of the ego, for as long as it's in view — manually panning,
+zooming, or hitting recenter (⊕) drops back to following the ego.
+
 ### Bulk directory scanning
 
 `Scan directory…` expects (and tolerates minor structural variation on) a
@@ -113,6 +123,14 @@ are reported in the scan summary rather than silently dropped. Scanned
 traces are registered *by reference* — nothing is copied or parsed until you
 actually open one, so scanning ~20,000 files takes well under a second.
 
+Type a path directly into the field, or click **Browse…** to navigate the
+filesystem *on the machine running the server* (the normal case for this
+tool, since it's meant to run locally) — it opens a small folder browser
+under the field: click a subfolder to descend into it, the ↑ button to go
+up, and **Use this folder** to fill the path field with wherever you've
+navigated to. It only lists folders, not files, and skips hidden (dot)
+directories.
+
 ### Batch fix + predict
 
 Open the trace picker, check the traces you want (or **Select shown** to
@@ -128,6 +146,20 @@ the result. Every artifact — corrected ADMA + annotation, OpenDRIVE +
 OpenSCENARIO, and a trace summary report — is written to `output/` for each
 processed trace; see *Output directory* below.
 
+This works well up to however many traces you're willing to select by hand
+in the trace picker. For a whole corpus — including one larger than the
+picker's 200-per-page display — use **Fix + predict ALL matched traces** in
+the Scan directory panel instead. It runs the identical pipeline over every
+trace currently registered with the server (not just what's shown or
+selected), as a background job on the server so the request returns
+immediately; the GUI polls for progress (`n/total processed`, current trace
+name, any failures) until it finishes. It's a plain button rather than a
+separate command-line script so the whole workflow — scan, inspect a few,
+process everything — stays inside one tool; a large corpus (thousands of
+traces) is processed one at a time and each trace is dropped from the
+server's memory cache right after its output is written, so memory stays
+bounded regardless of corpus size. Only one such run can be in flight at a
+time; starting another while one is running is rejected until it finishes.
 ### Trace summary report
 
 The `.txt` / `.xml` export (per-trace button, or written automatically by
