@@ -50,6 +50,12 @@ python3 -m pytest
 
 ## Using the GUI
 
+The right-hand panel is where you inspect and fix a trace; a left-hand
+**Ego Odometry** panel shows a few raw, always-cheap-to-compute ego stats
+(elapsed time, speed, compass heading, distance traveled) as the trace
+plays — nothing that requires re-running validation or analysis, so it
+updates every frame for free.
+
 1. **Pick a trace** from the trace picker (top bar) — it's a searchable
    list, not a plain dropdown, so it stays usable with a corpus of
    thousands (type to filter; it queries the server rather than holding

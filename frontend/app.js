@@ -215,8 +215,22 @@ async function runBatch() {
   }
 }
 
+function precomputeEgoDistance(path) {
+  // Cumulative arc length along the ego path, computed once per scene load
+  // (not per frame) so the odometry panel's "distance traveled" is a cheap
+  // O(1) interpolated lookup like every other ego field -- see egoAt().
+  let dist = 0;
+  path[0].dist_m = 0;
+  for (let i = 1; i < path.length; i++) {
+    const a = path[i - 1], b = path[i];
+    dist += Math.hypot(b.x - a.x, b.y - a.y);
+    b.dist_m = dist;
+  }
+}
+
 function applyScene(scene) {
   state.scene = scene;
+  if (scene.ego.path.length) precomputeEgoDistance(scene.ego.path);
   el("timeline").max = scene.duration_s.toFixed(3);
   if (state.timeS > scene.duration_s) state.timeS = 0;
   renderIssueList();
@@ -260,6 +274,7 @@ function egoAt(t) {
     speed_mps: a.speed_mps + (b.speed_mps - a.speed_mps) * f,
     lat: a.lat + (b.lat - a.lat) * f,
     lon: a.lon + (b.lon - a.lon) * f,
+    dist_m: a.dist_m + (b.dist_m - a.dist_m) * f,
   }));
 }
 
@@ -311,6 +326,7 @@ function draw() {
 
   const ego = egoAt(state.timeS);
   updateGpsReadout(ego);
+  updateOdometry(ego);
   if (state.camera.followVehicleId != null) {
     const followed = state.scene.vehicles.find((v) => v.id === state.camera.followVehicleId);
     const v = followed ? vehicleAt(followed, state.timeS) : null;
@@ -435,6 +451,33 @@ function updateGpsReadout(ego) {
   lastGpsText = `${ego.lat.toFixed(6)}, ${ego.lon.toFixed(6)}`;
   if (el("gps-readout").classList.contains("copied")) return; // "Copied: ..." feedback showing -- don't stomp it
   el("gps-readout-text").textContent = `Lat ${ego.lat.toFixed(6)}, Lon ${ego.lon.toFixed(6)}`;
+}
+
+// ---------- Ego odometry panel ----------
+
+const COMPASS_POINTS = ["N", "NE", "E", "SE", "S", "SW", "W", "NW"];
+
+function compassLabel(bearingDeg) {
+  const idx = Math.round(bearingDeg / 45) % 8;
+  return COMPASS_POINTS[idx];
+}
+
+// ego.heading_deg is the math-convention yaw used for canvas rotation
+// (CCW from East -- see drawBox/heading-up camera logic), not a compass
+// bearing. Converting back: yaw_deg = (90 + compass_deg) % 360 (see
+// geo/transform.py's docstring), so compass_deg = (450 - yaw_deg) % 360.
+function yawToCompassBearing(yawDeg) {
+  return ((450 - yawDeg) % 360 + 360) % 360;
+}
+
+function updateOdometry(ego) {
+  el("odo-time").textContent = `${state.timeS.toFixed(2)} s`;
+  if (!ego) return;
+  el("odo-speed").textContent = `${ego.speed_mps.toFixed(1)} m/s (${(ego.speed_mps * 3.6).toFixed(0)} km/h)`;
+  const bearing = yawToCompassBearing(ego.heading_deg);
+  el("odo-heading").textContent = `${bearing.toFixed(0)}° ${compassLabel(bearing)}`;
+  const distM = ego.dist_m || 0;
+  el("odo-distance").textContent = distM >= 1000 ? `${(distM / 1000).toFixed(2)} km` : `${distM.toFixed(0)} m`;
 }
 
 let copyFeedbackTimeout = null;

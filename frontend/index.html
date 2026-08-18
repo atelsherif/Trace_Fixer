@@ -81,6 +81,16 @@
   </header>
 
   <main class="layout">
+    <aside class="side-panel side-panel-left">
+      <div class="panel-block">
+        <h2>Ego Odometry</h2>
+        <div class="stat-row"><span class="stat-label">Elapsed</span><span id="odo-time" class="stat-value">0.00 s</span></div>
+        <div class="stat-row"><span class="stat-label">Speed</span><span id="odo-speed" class="stat-value">&mdash;</span></div>
+        <div class="stat-row"><span class="stat-label">Heading</span><span id="odo-heading" class="stat-value">&mdash;</span></div>
+        <div class="stat-row"><span class="stat-label">Distance traveled</span><span id="odo-distance" class="stat-value">&mdash;</span></div>
+      </div>
+    </aside>
+
     <section class="viewport-panel">
       <canvas id="viewport"></canvas>
       <div class="viewport-overlay">
@@ -104,7 +114,7 @@
       </button>
     </section>
 
-    <aside class="side-panel">
+    <aside class="side-panel side-panel-right">
       <div class="panel-block">
         <h2>Pipeline</h2>
         <div class="button-row">
