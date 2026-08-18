@@ -314,7 +314,12 @@ backend/trace_fixer/
   export/adma_writer.py       EgoTrace -> ADMA CSV
   export/annotation_writer.py surgically patches the *original* XML tree
                                (only touches what was fixed/predicted)
-  export/opendrive.py         minimal piecewise-linear OpenDRIVE road
+  export/road_geometry.py     reconstructs road geometry (curvature-real
+                               reference line, annotation-derived lane
+                               sections with a sanity-checked fallback,
+                               static-object placement) -- see "OpenDRIVE
+                               generation" below
+  export/opendrive.py         serializes road_geometry's plan to .xodr
   export/openscenario.py      OpenSCENARIO FollowTrajectoryAction replay
   export/report.py            trace summary export (txt / xml): scene
                                composition, braking/overtake events, issues
@@ -455,15 +460,91 @@ which is the more precise source of truth regardless. After fixing, stored
 heading matches the position-implied direction of travel to within ~0.1°
 for every vehicle in `sample1`.
 
+## OpenDRIVE generation
+
+`export/road_geometry.py` builds the road model that `export/opendrive.py`
+serializes to XML. Two independent signals feed it, trusted very
+differently:
+
+- **The reference line** always follows the ego's own recorded path, using
+  its *real* IMU/GPS heading at each point rather than a heading derived
+  from the straight-line direction between two samples. That lets the
+  plan-view geometry be emitted as a sequence of constant-curvature `<arc>`
+  segments (falling back to `<line>` where curvature is negligible)
+  instead of a jointed polyline — curvature is computed directly as
+  `heading change / arc length` between consecutive samples, so it has no
+  dependency on annotation quality at all; it's the same trusted ego trace
+  used throughout the rest of the tool.
+
+- **Lane count and width**, in contrast, come from annotation data (the
+  lane-marking polylines), which is sparser and can be noisy, gappy, or
+  occluded. This is deliberately *not* trusted blindly — see "Why this
+  needs to be conservative" below. The road is divided into 30m windows;
+  each window's lane-marking points are projected onto the reference line
+  (giving each point a road-relative `s`/`t`) and clustered laterally
+  (points within 1.5m of each other are the same physical boundary,
+  further apart is a different one). The two clusters bracketing the
+  ego's own path (`t=0`) are its lane's edges; walking outward from there
+  gives the full lane count and each lane's width. A window's estimate is
+  used only if it passes *every* check:
+  - at least 20 marking points contributed to it,
+  - the resulting lane count and every lane's width are within realistic
+    bounds (1-6 lanes, 2.5-4.5m each),
+  - it agrees with vehicles' `obj_lane` labels ("EGO lane", "1st Right",
+    ...) observed in that window, when there are enough to check,
+  - it agrees with the annotation's own directly-authored
+    `frame_meta.num_lanes` for that stretch, when available (sparser still,
+    but a stronger signal than anything geometrically derived, since it
+    isn't subject to the same occlusion/tracking noise),
+  - the same result persists for at least 2 consecutive windows, so one
+    noisy window can't fragment the road into a flickering sequence of
+    spurious lane sections.
+
+  A window that fails any check falls back to the trace's overall majority
+  declared lane count and a constant default width (3.5m) — the same
+  behavior the generator always used to have. Consecutive windows with
+  matching results merge into a single OpenDRIVE `<laneSection>`, so the
+  file only grows a new section where something real actually changes.
+
+  **Why this needs to be conservative**: a jaggedly-wrong road (an
+  unbounded width spike from one bad frame, a phantom lane from an
+  occlusion gap) is worse for a downstream simulator or planner than a
+  smoothly-wrong one (constant width/count everywhere, today's original
+  behavior) — so a low-confidence window degrading to the old constant-width
+  fallback is the deliberately-chosen failure mode, not a shortcut. This
+  was validated against real bugs, not hypothetically: an early version of
+  this estimator, before the `frame_meta`/persistence checks existed,
+  produced a false "lane count drops to 1" read on `sample1` that
+  contradicted the trace's own constant `frame_meta.num_lanes=2` — caused
+  by an assumption that the ego always drives at its lane's edge (it
+  doesn't; it drives near lane center, with real boundaries on both
+  sides). `tests/test_road_geometry.py` has a regression test asserting
+  every annotation-derived section agrees with `frame_meta` wherever both
+  exist, specifically to catch a recurrence of that bug.
+
+- **Static objects** (traffic signs, reflective markers, highway
+  accessories — whatever the annotation itself labeled) are placed into
+  the road's `<objects>` element: one representative observation per
+  object (they don't move, so any one observation's position/dimensions
+  are as good as any other) projected onto the road as `s`/`t`. The
+  mapping from the annotation's free-text type to ASAM's `e_objectType`
+  enum is best-effort — there's no dedicated category for some of these
+  (a delineator post, for instance) — so the original annotation label is
+  always preserved in the object's `name` attribute regardless of how
+  confident the `type` mapping is. Traffic-sign *meaning* (what a sign
+  actually says) isn't attempted; the annotation doesn't carry that, and a
+  fuller implementation would need ASAM's `<signals>` element with a real
+  country-specific sign-code catalog instead.
+
 ## Known limitations / scope (v1)
 
-- **OpenDRIVE is intentionally minimal**: a piecewise-linear reference line
-  along the (fixed) ego path, constant lane count/width. This is meant to
-  be good enough for this tool's own in-GUI sanity-check simulation, *not*
-  a replacement for the HERE-derived map Applied Intuition already builds
-  from the ADMA trace. The reference line runs along the edge of the ego's
-  lane rather than precisely through its center (a half-lane-width
-  simplification).
+- **OpenDRIVE is intentionally limited to what the trace itself can support**
+  — no map provider, real lane-level geometry where the annotation
+  supports it, a sane fallback where it doesn't. See *OpenDRIVE generation*
+  below for how. Still not a replacement for a real HD map: the reference
+  line runs along the ego's own driven path rather than precisely through
+  the road's true center, and curvature is a sequence of constant-curvature
+  arcs fit to real heading, not full clothoid continuity.
 - **Prediction is per-vehicle** (both directions), using a constant-speed,
   lane-tangent-following model. It doesn't reason about other traffic, so
   two independently-predicted vehicles can end up flagged as colliding —
