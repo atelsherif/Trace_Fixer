@@ -86,7 +86,6 @@ body {
 .trace-picker-panel, .scan-panel {
   position: absolute;
   top: calc(100% + 6px);
-  left: 0;
   width: 340px;
   background: var(--panel-bg-alt);
   border: 1px solid var(--border);
@@ -95,6 +94,12 @@ body {
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
   z-index: 20;
 }
+
+.trace-picker-panel { left: 0; }
+
+/* .scan-picker sits near the right edge of the toolbar -- anchor the panel
+   to its right edge instead of its left, or it overflows off-screen. */
+.scan-panel { right: 0; }
 
 .trace-picker-panel.hidden, .scan-panel.hidden {
   display: none;
