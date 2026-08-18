@@ -177,29 +177,38 @@ def fetch_enrichment(
     provider_name: str,
     cache_dir: Path,
     timeout: float = DEFAULT_TIMEOUT_S,
-) -> MapEnrichmentResult | None:
+) -> tuple[MapEnrichmentResult | None, str | None]:
     """The one function callers should use. Never raises: any problem
-    (unknown provider, network failure, bad response) is logged and
-    swallowed, returning None so the caller proceeds without enrichment.
-    Caches successful fetches to disk keyed by (provider, rounded bbox) so
-    repeated exports of the same trace/corpus don't re-hit the network.
+    (unknown provider, network failure, bad response) is logged *and*
+    returned as a short human-readable string, so a caller (the API layer,
+    ultimately the GUI's status line) can show *why* enrichment didn't
+    happen instead of just "unavailable" -- important since this is the
+    one part of the export pipeline whose failure mode (network problems)
+    isn't under this tool's control and is worth being able to diagnose
+    without digging through server logs. Returns (None, None) only for the
+    caller passing enrich=None/"" in the first place; a real attempt that
+    fails returns (None, <reason>). Caches successful fetches to disk keyed
+    by (provider, rounded bbox) so repeated exports of the same trace/
+    corpus don't re-hit the network.
     """
     provider = PROVIDERS.get(provider_name)
     if provider is None:
-        logger.warning("Unknown map enrichment provider %r; proceeding without enrichment", provider_name)
-        return None
+        error = f"unknown provider {provider_name!r} (known: {sorted(PROVIDERS)})"
+        logger.warning("Map enrichment: %s; proceeding without it", error)
+        return None, error
 
     bbox = BBox.from_trace(trace)
     cache_file = _cache_path(cache_dir, provider.name, bbox)
     cached = _load_cached(cache_file)
     if cached is not None:
-        return cached
+        return cached, None
 
     try:
         result = provider.fetch(bbox, timeout=timeout)
-    except Exception:  # noqa: BLE001 -- network/parsing failures must never break an export
-        logger.warning("Map enrichment fetch failed (provider=%s); proceeding without it", provider_name, exc_info=True)
-        return None
+    except Exception as exc:  # noqa: BLE001 -- network/parsing failures must never break an export
+        error = f"{type(exc).__name__}: {exc}"
+        logger.warning("Map enrichment fetch failed (provider=%s): %s; proceeding without it", provider_name, error, exc_info=True)
+        return None, error
 
     _save_cache(cache_file, result)
-    return result
+    return result, None

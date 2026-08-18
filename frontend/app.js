@@ -49,9 +49,11 @@ async function runExport(label, path) {
     const data = await apiGet(path);
     let msg = `Saved ${label} to ${data.output_path}`;
     if (data.enrichment_requested) {
-      msg += data.enrichment
-        ? ` (enriched with ${data.enrichment})`
-        : ` (${data.enrichment_requested} enrichment unavailable, used offline data)`;
+      if (data.enrichment) {
+        msg += ` (enriched with ${data.enrichment})`;
+      } else {
+        msg += ` (${data.enrichment_requested} enrichment failed: ${data.enrichment_error || "unknown reason"}; used offline data)`;
+      }
     }
     setStatus(msg);
   } catch (err) {

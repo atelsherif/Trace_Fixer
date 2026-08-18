@@ -84,21 +84,28 @@ def test_way_lanes_and_maxspeed_handle_missing_or_malformed_tags():
     assert bad.maxspeed_kph is None
 
 
-def test_fetch_enrichment_unknown_provider_returns_none(sample1, tmp_path):
+def test_fetch_enrichment_unknown_provider_returns_none_with_reason(sample1, tmp_path):
     from trace_fixer.export.map_enrichment import fetch_enrichment
 
-    assert fetch_enrichment(sample1, "bogus_provider", cache_dir=tmp_path) is None
+    result, error = fetch_enrichment(sample1, "bogus_provider", cache_dir=tmp_path)
+    assert result is None
+    assert "bogus_provider" in error
 
 
 def test_fetch_enrichment_never_raises_on_network_failure(sample1, tmp_path, monkeypatch):
+    """And the failure reason must be surfaced, not just swallowed -- this
+    is what the API/GUI status line shows instead of a bare "unavailable"
+    so a real deployment failure (offline, corporate firewall, Overpass
+    downtime) can actually be diagnosed."""
     from trace_fixer.export.map_enrichment import fetch_enrichment
 
     def boom(*a, **kw):
         raise ConnectionError("simulated network failure")
 
     monkeypatch.setattr("httpx.post", boom)
-    result = fetch_enrichment(sample1, "osm", cache_dir=tmp_path, timeout=1)
+    result, error = fetch_enrichment(sample1, "osm", cache_dir=tmp_path, timeout=1)
     assert result is None
+    assert "simulated network failure" in error
 
 
 def test_fetch_enrichment_caches_and_skips_network_on_second_call(sample1, tmp_path, monkeypatch):
@@ -112,12 +119,14 @@ def test_fetch_enrichment_caches_and_skips_network_on_second_call(sample1, tmp_p
 
     monkeypatch.setattr("httpx.post", fake_post)
 
-    first = fetch_enrichment(sample1, "osm", cache_dir=tmp_path)
+    first, error1 = fetch_enrichment(sample1, "osm", cache_dir=tmp_path)
     assert first is not None
+    assert error1 is None
     assert len(first.ways) == 1
     assert len(calls) == 1
 
-    second = fetch_enrichment(sample1, "osm", cache_dir=tmp_path)
+    second, error2 = fetch_enrichment(sample1, "osm", cache_dir=tmp_path)
     assert second is not None
+    assert error2 is None
     assert len(second.ways) == 1
     assert len(calls) == 1  # cache hit -- no second network call

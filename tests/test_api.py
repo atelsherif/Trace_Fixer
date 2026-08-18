@@ -346,3 +346,4 @@ def test_export_scenario_enrich_falls_back_gracefully_on_failure(client_with_cor
     data = r.json()
     assert data["enrichment"] is None
     assert data["enrichment_requested"] == "osm"
+    assert "simulated network failure" in data["enrichment_error"]

@@ -431,9 +431,9 @@ def export_scenario(trace_id: str, enrich: str | None = None):
     as if `enrich` had been omitted -- see export.map_enrichment.
     """
     trace = _get_trace_or_404(trace_id)
-    enrichment = None
+    enrichment, enrichment_error = None, None
     if enrich:
-        enrichment = fetch_enrichment(trace, enrich, cache_dir=OUTPUT_DIR / "map_cache")
+        enrichment, enrichment_error = fetch_enrichment(trace, enrich, cache_dir=OUTPUT_DIR / "map_cache")
 
     xodr_path, xosc_path = scenario_output_paths(trace_id, OUTPUT_DIR)
     xodr_path.write_text(generate_opendrive(trace, enrichment=enrichment))
@@ -443,6 +443,7 @@ def export_scenario(trace_id: str, enrich: str | None = None):
         "files": [_relative_output_path(xodr_path), _relative_output_path(xosc_path)],
         "enrichment": enrichment.provider if enrichment else None,
         "enrichment_requested": enrich,
+        "enrichment_error": enrichment_error,
     }
 
 
