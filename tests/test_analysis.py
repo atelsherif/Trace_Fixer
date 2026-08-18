@@ -94,3 +94,70 @@ def test_build_trace_summary_combines_all_three(sample1):
     assert summary.object_counts == {"Truck": 4, "Car": 1}
     assert summary.braking_events == []
     assert len(summary.overtake_events) == 3
+
+
+def test_sample1_has_a_real_short_headway_and_cut_in(sample1):
+    """sample1's vehicle 2 genuinely merges in close ahead of the ego --
+    confirmed by inspecting its x_rel/y_rel track -- so this is a real
+    positive case rather than an injected one."""
+    from trace_fixer.analysis import NEAR_MISS_HEADWAY_S, detect_cut_in_events, detect_short_headway_events
+
+    headway_events = detect_short_headway_events(sample1)
+    assert len(headway_events) == 1
+    ev = headway_events[0]
+    assert ev.vehicle_id == 2
+    assert ev.min_headway_s < NEAR_MISS_HEADWAY_S
+    assert ev.near_miss is True
+
+    cut_ins = detect_cut_in_events(sample1)
+    assert len(cut_ins) == 1
+    assert cut_ins[0].vehicle_id == 2
+    assert cut_ins[0].t_us == ev.t_start_us
+
+
+def test_neither_sample_has_a_standstill_or_sharp_turn(sample1, sample2):
+    """Negative case: both bundled samples are steady-state highway
+    cruising, so these detectors shouldn't fire on unmodified data."""
+    from trace_fixer.analysis import detect_sharp_turn_events, detect_standstill_events
+
+    assert detect_standstill_events(sample1) == []
+    assert detect_standstill_events(sample2) == []
+    assert detect_sharp_turn_events(sample1) == []
+    assert detect_sharp_turn_events(sample2) == []
+
+
+def test_detects_injected_standstill_event(sample1):
+    from trace_fixer.analysis import MIN_STANDSTILL_DURATION_S, detect_standstill_events
+
+    trace = copy.deepcopy(sample1)
+    poses = trace.ego.poses
+    start_idx = len(poses) // 3
+    end_idx = start_idx + len(poses) // 6  # comfortably longer than MIN_STANDSTILL_DURATION_S
+    for i in range(start_idx, end_idx):
+        poses[i].vx_mps = 0.0
+        poses[i].vy_mps = 0.0
+
+    events = detect_standstill_events(trace)
+    assert len(events) == 1
+    assert (events[0].t_end_us - events[0].t_start_us) / 1e6 >= MIN_STANDSTILL_DURATION_S
+
+
+def test_detects_injected_sharp_turn_event(sample1):
+    from trace_fixer.analysis import SHARP_TURN_DEG, detect_sharp_turn_events
+
+    trace = copy.deepcopy(sample1)
+    poses = trace.ego.poses
+    start_idx = len(poses) // 3
+    # Ramp heading through a hard 90 deg turn over ~2s, then hold.
+    turn_end_idx = min(len(poses) - 1, start_idx + len(poses) // 10)
+    base_heading = poses[start_idx].heading_deg
+    for i in range(start_idx, len(poses)):
+        if i <= turn_end_idx:
+            frac = (i - start_idx) / max(1, turn_end_idx - start_idx)
+            poses[i].heading_deg = (base_heading + 90.0 * frac) % 360.0
+        else:
+            poses[i].heading_deg = (base_heading + 90.0) % 360.0
+
+    events = detect_sharp_turn_events(trace)
+    assert len(events) >= 1
+    assert any(abs(e.heading_change_deg) >= SHARP_TURN_DEG for e in events)

@@ -3,11 +3,12 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from trace_fixer import catalog
 from trace_fixer.browse import list_subdirectories
 from trace_fixer.export.adma_writer import write_adma_csv
 from trace_fixer.export.annotation_writer import write_annotation_xml
@@ -36,6 +37,16 @@ FRONTEND_DIR = REPO_ROOT / "frontend"
 app = FastAPI(title="PreTwin")
 store = TraceStore(traces_dir=DATA_DIR)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _catalog_connect():
+    """A fresh connection per call rather than one shared across threads --
+    see catalog.connect's docstring. Cheap: SQLite connection setup is
+    negligible next to the trace parsing this always sits alongside. Reads
+    OUTPUT_DIR at call time (not a module-level constant) so tests that
+    point OUTPUT_DIR at an isolated tmp_path get an isolated catalog too.
+    """
+    return catalog.connect(OUTPUT_DIR / "catalog.sqlite")
 
 
 def _get_trace_or_404(trace_id: str):
@@ -113,6 +124,14 @@ def scan_directory(req: ScanRequest):
     if not root.is_dir():
         raise HTTPException(status_code=400, detail=f"Not a directory (on the server running this app): {root}")
     result = store.scan_directory(root)
+
+    conn = _catalog_connect()
+    try:
+        for trace_id, (adma_path, annotation_path) in result.matched.items():
+            catalog.register_scanned(conn, trace_id, adma_path, annotation_path)
+    finally:
+        conn.close()
+
     return ScanResponse(
         adma_found=result.adma_found,
         xml_found=result.xml_found,
@@ -227,9 +246,12 @@ def batch_fix_predict(trace_id: str, req: BatchFixPredictRequest = BatchFixPredi
         raise HTTPException(status_code=404, detail=f"Unknown trace_id '{trace_id}'")
 
 
+BATCH_ALL_MODES = ("catalog", "fix", "fix_catalog")
+
 _batch_all_lock = threading.Lock()
 _batch_all_state: dict = {
     "running": False,
+    "mode": None,
     "total": 0,
     "done": 0,
     "current": None,
@@ -237,13 +259,33 @@ _batch_all_state: dict = {
 }
 
 
-def _run_batch_all(trace_ids: list[str]) -> None:
+def _catalog_trace(trace_id: str, trace) -> None:
+    conn = _catalog_connect()
+    try:
+        catalog.record_trace(conn, trace, store.original_adma_path(trace_id), store.original_annotation_path(trace_id))
+    finally:
+        conn.close()
+
+
+def _process_one_for_batch_all(trace_id: str, mode: str, req: BatchFixPredictRequest) -> None:
+    if mode == "catalog":
+        trace = store.get(trace_id)
+        run_validation(trace)
+        _catalog_trace(trace_id, trace)
+    elif mode == "fix":
+        _fix_predict_and_write_output(trace_id, req)
+    else:  # "fix_catalog"
+        _fix_predict_and_write_output(trace_id, req)
+        _catalog_trace(trace_id, store.get(trace_id))  # already fixed + re-validated, still cached
+
+
+def _run_batch_all(trace_ids: list[str], mode: str) -> None:
     req = BatchFixPredictRequest()
     for trace_id in trace_ids:
         with _batch_all_lock:
             _batch_all_state["current"] = trace_id
         try:
-            _fix_predict_and_write_output(trace_id, req)
+            _process_one_for_batch_all(trace_id, mode, req)
         except Exception as exc:  # noqa: BLE001 -- one bad trace must not stop the run
             with _batch_all_lock:
                 _batch_all_state["failed"].append({"trace_id": trace_id, "error": str(exc)})
@@ -257,25 +299,73 @@ def _run_batch_all(trace_ids: list[str]) -> None:
 
 
 @app.post("/api/batch/all")
-def start_batch_all():
-    """Kicks off fix + predict for *every* registered trace (not just the
-    page currently shown in the trace picker) in a background thread, and
-    returns immediately -- poll /api/batch/all/status for progress. Meant
-    for corpora too large to comfortably multi-select in the GUI.
+def start_batch_all(mode: str = "fix"):
+    """Runs one of three pipelines over *every* registered trace (not just
+    the page currently shown in the trace picker) in a background thread,
+    and returns immediately -- poll /api/batch/all/status for progress.
+    Meant for corpora too large to comfortably multi-select in the GUI.
+
+      - "catalog": validate only, then record location/metadata/phenomena/
+        issues into the trace catalog (see catalog.py). No output/ files.
+      - "fix": the existing fix + predict + write-to-output/ pipeline
+        (validate -> fix -> predict -> re-validate). Doesn't touch the
+        catalog.
+      - "fix_catalog": both, in one pass per trace (one parse instead of
+        two) -- catalogs the *corrected* trace.
     """
+    if mode not in BATCH_ALL_MODES:
+        raise HTTPException(status_code=400, detail=f"mode must be one of {BATCH_ALL_MODES}")
     with _batch_all_lock:
         if _batch_all_state["running"]:
             raise HTTPException(status_code=409, detail="A batch run is already in progress")
         trace_ids = store.list_ids()
-        _batch_all_state.update(running=True, total=len(trace_ids), done=0, current=None, failed=[])
-    threading.Thread(target=_run_batch_all, args=(trace_ids,), daemon=True).start()
-    return {"started": True, "total": len(trace_ids)}
+        _batch_all_state.update(running=True, mode=mode, total=len(trace_ids), done=0, current=None, failed=[])
+    threading.Thread(target=_run_batch_all, args=(trace_ids, mode), daemon=True).start()
+    return {"started": True, "mode": mode, "total": len(trace_ids)}
 
 
 @app.get("/api/batch/all/status")
 def batch_all_status():
     with _batch_all_lock:
         return dict(_batch_all_state)
+
+
+class CatalogQueryResponse(BaseModel):
+    rows: list[dict]
+    total: int
+    offset: int
+
+
+@app.get("/api/catalog", response_model=CatalogQueryResponse)
+def get_catalog(
+    q: str | None = None,
+    phenomenon: list[str] | None = Query(default=None),
+    issue_category: list[str] | None = Query(default=None),
+    limit: int = 200,
+    offset: int = 0,
+):
+    conn = _catalog_connect()
+    try:
+        rows, total = catalog.query(
+            conn, q=q, phenomena=phenomenon, issue_categories=issue_category, limit=limit, offset=offset
+        )
+    finally:
+        conn.close()
+    return CatalogQueryResponse(rows=rows, total=total, offset=offset)
+
+
+@app.get("/api/catalog/tags")
+def get_catalog_tags():
+    return {"phenomena": catalog.KNOWN_PHENOMENA, "issue_categories": catalog.KNOWN_ISSUE_CATEGORIES}
+
+
+@app.get("/api/catalog/stats")
+def get_catalog_stats():
+    conn = _catalog_connect()
+    try:
+        return catalog.stats(conn)
+    finally:
+        conn.close()
 
 
 class SyncOffsetRequest(BaseModel):

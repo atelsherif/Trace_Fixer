@@ -87,6 +87,10 @@ class TraceStore:
         _, annotation_path = self._paths(trace_id)
         return annotation_path
 
+    def original_adma_path(self, trace_id: str) -> Path:
+        adma_path, _ = self._paths(trace_id)
+        return adma_path
+
     def reload(self, trace_id: str) -> Trace:
         self._cache.pop(trace_id, None)
         return self.get(trace_id)

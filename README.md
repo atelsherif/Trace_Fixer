@@ -148,18 +148,71 @@ processed trace; see *Output directory* below.
 
 This works well up to however many traces you're willing to select by hand
 in the trace picker. For a whole corpus — including one larger than the
-picker's 200-per-page display — use **Fix + predict ALL matched traces** in
-the Scan directory panel instead. It runs the identical pipeline over every
-trace currently registered with the server (not just what's shown or
-selected), as a background job on the server so the request returns
-immediately; the GUI polls for progress (`n/total processed`, current trace
-name, any failures) until it finishes. It's a plain button rather than a
-separate command-line script so the whole workflow — scan, inspect a few,
-process everything — stays inside one tool; a large corpus (thousands of
-traces) is processed one at a time and each trace is dropped from the
-server's memory cache right after its output is written, so memory stays
-bounded regardless of corpus size. Only one such run can be in flight at a
-time; starting another while one is running is rejected until it finishes.
+picker's 200-per-page display — the Scan directory panel has three buttons
+that each run a background job over *every* trace currently registered with
+the server (not just what's shown or selected), and return immediately; the
+GUI polls for progress (`n/total processed`, current trace name, any
+failures) until it finishes:
+
+- **Fix Traces** — the same fix + predict + write-to-`output/` pipeline as
+  above, over the whole corpus.
+- **Build Catalog** — validates every trace and records it into the *trace
+  catalog* (see below) — location, road/weather/light conditions,
+  phenomenon tags, and issue counts — without touching `output/` at all.
+  Cheaper than Fix Traces when you just want to triage a corpus, not
+  produce corrected files yet.
+- **Fix and Build Catalog** — both, in one pass per trace (one parse
+  instead of two), so the catalog reflects the *corrected* trace.
+
+They're plain buttons rather than a separate command-line script so the
+whole workflow — scan, inspect a few, catalog or process everything — stays
+inside one tool. A large corpus (thousands of traces) is processed one at a
+time, and each trace is dropped from the server's memory cache right after
+it's handled, so memory stays bounded regardless of corpus size. Only one
+such run can be in flight at a time; starting another while one is running
+is rejected until it finishes.
+
+### Trace catalog
+
+Click **Catalog…** in the top bar to open a searchable, filterable table of
+every trace the tool has ever scanned or processed — meant for triaging a
+large corpus without opening each trace one at a time. It's backed by a
+small SQLite database at `output/catalog.sqlite`, populated three ways:
+
+- Scanning a directory adds an identity row per matched trace (name + file
+  paths) immediately — cheap enough for tens of thousands of traces since
+  nothing is parsed.
+- Opening a single trace in the GUI, or including it in a batch, doesn't by
+  itself update the catalog.
+- **Build Catalog** / **Fix and Build Catalog** (see above) is what fills in
+  the rest: location (the trace's first GPS fix), duration, vehicle count,
+  road type / weather / light conditions (read from the annotation file's
+  per-frame metadata, when present), a set of **phenomenon** tags, and
+  **issue** counts by category and severity (the same categories the issue
+  list uses: `kinematic`, `collision`, `off_road`, `sync`).
+
+Phenomena are behavioral tags detected the same way the trace summary
+report's braking/overtake events are (see below), plus five more added
+specifically for the catalog:
+
+- `moderate_braking` / `hard_braking`, `vehicle_overtakes_ego` /
+  `ego_overtakes_vehicle` — as in the trace summary report.
+- `short_headway` / `near_miss` — a vehicle ahead in roughly the ego's own
+  lane closer than 1.0s / 0.5s away at the ego's current speed.
+- `cut_in` — a vehicle merges from outside the ego's lane into it while
+  already close ahead (distinct from an overtake, which crosses the ego's
+  centerline rather than merging into the lane ahead of it).
+- `standstill` — the ego stopped or crawling (under 0.5 m/s) for 3+ seconds.
+- `sharp_turn` — a sustained ego heading change of 45°+ within a 3-second
+  window.
+
+The search box filters by trace name; the phenomenon/issue chips filter by
+tag, AND'd together (a trace must have every selected tag to match) — click
+a chip again to remove it. Click **Open** on any row to load that trace and
+close the catalog. Re-processing a trace replaces its phenomena/issues
+rather than accumulating them, so the catalog always reflects the trace's
+*current* state, not a history of every pass over it.
+
 ### Trace summary report
 
 The `.txt` / `.xml` export (per-trace button, or written automatically by
@@ -191,12 +244,15 @@ output/annotations/Annotations/<original annotation filename>
 output/scenarios/<trace_id>/<trace_id>.xodr
 output/scenarios/<trace_id>/<trace_id>.xosc
 output/reports/<trace_id>/<trace_id>_summary.<txt|xml>
+output/catalog.sqlite
 ```
 
 The ADMA/annotation layout mirrors the input corpus convention (annotation
 filename preserved exactly as scanned, suffix variant and all) so that
 output can be handed off, or re-scanned as input elsewhere, the same way
-the source was.
+the source was. `catalog.sqlite` is the trace catalog (see above) — the one
+thing in `output/` that isn't a per-trace export, since it's a single
+database file covering the whole corpus.
 
 ## Architecture
 
@@ -221,8 +277,14 @@ backend/trace_fixer/
   validation/fixes.py         smoothing, off-road clamp, trailing-collision
                                trim
   prediction/extrapolate.py   backward, lane-following trajectory prediction
-  analysis.py                 object counts, ego braking events, overtake
-                               events -- feeds export/report.py
+  analysis.py                 object counts, ego braking/overtake/short-
+                               headway/cut-in/standstill/sharp-turn events --
+                               feeds export/report.py and catalog.py
+  catalog.py                  persistent per-trace SQLite catalog: identity,
+                               location/metadata, phenomenon tags, issue
+                               counts -- output/catalog.sqlite
+  browse.py                   server-side directory listing for the Scan
+                               directory panel's folder browser
   export/adma_writer.py       EgoTrace -> ADMA CSV
   export/annotation_writer.py surgically patches the *original* XML tree
                                (only touches what was fixed/predicted)

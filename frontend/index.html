@@ -60,13 +60,23 @@
           <button id="scan-run">Scan</button>
           <p id="scan-status" class="scan-status"></p>
           <div class="scan-batch-all">
-            <button id="scan-batch-all" title="Fix + predict every matched trace in this corpus and write results to output/">
-              Fix + predict ALL matched traces
+            <div class="button-row">
+              <button id="scan-batch-catalog" title="Analyze every matched trace (phenomena + issues) into the trace catalog, without writing fixed files to output/">
+                Build Catalog
+              </button>
+              <button id="scan-batch-fix" title="Fix + predict every matched trace and write results to output/">
+                Fix Traces
+              </button>
+            </div>
+            <button id="scan-batch-fix-catalog" title="Fix + predict every matched trace, and catalog the corrected result, in one pass">
+              Fix and Build Catalog
             </button>
             <p id="scan-batch-all-status" class="scan-status"></p>
           </div>
         </div>
       </div>
+
+      <button id="catalog-btn" title="Browse the trace catalog: metadata, phenomena, and issues across every scanned trace">Catalog&hellip;</button>
     </div>
   </header>
 
@@ -137,6 +147,52 @@
       </div>
     </aside>
   </main>
+
+  <div id="catalog-modal" class="catalog-modal hidden">
+    <div class="catalog-dialog">
+      <div class="catalog-header">
+        <h2>Trace catalog</h2>
+        <span id="catalog-stats" class="catalog-stats"></span>
+        <button id="catalog-close" class="trace-nav-btn" title="Close">&#10005;</button>
+      </div>
+      <div class="catalog-filters">
+        <input id="catalog-search" type="text" placeholder="Search trace name&hellip;" autocomplete="off" />
+        <div class="catalog-filter-group">
+          <span class="catalog-filter-label">Phenomena</span>
+          <div id="catalog-phenomenon-filters" class="catalog-filter-chips"></div>
+        </div>
+        <div class="catalog-filter-group">
+          <span class="catalog-filter-label">Issues</span>
+          <div id="catalog-issue-filters" class="catalog-filter-chips"></div>
+        </div>
+      </div>
+      <div class="catalog-table-wrap">
+        <table class="catalog-table">
+          <thead>
+            <tr>
+              <th>Trace</th>
+              <th>Location</th>
+              <th>Duration</th>
+              <th>Vehicles</th>
+              <th>Road / weather / light</th>
+              <th>Phenomena</th>
+              <th>Issues</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="catalog-tbody"></tbody>
+        </table>
+      </div>
+      <div class="catalog-footer">
+        <span id="catalog-footer-label"></span>
+        <div class="trace-page-nav">
+          <button id="catalog-page-prev" class="trace-nav-btn" title="Previous page">&#9664;</button>
+          <span id="catalog-page-label"></span>
+          <button id="catalog-page-next" class="trace-nav-btn" title="Next page">&#9654;</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <footer class="timeline-bar">
     <button id="restart" title="Restart from the beginning (Home)">&#9198;</button>

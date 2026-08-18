@@ -205,19 +205,24 @@ def test_browse_dir_rejects_non_directory(tmp_path):
     assert r.status_code == 400
 
 
+def _wait_for_batch_done(client, timeout=10):
+    deadline = time.time() + timeout
+    status = client.get("/api/batch/all/status").json()
+    while status["running"] and time.time() < deadline:
+        time.sleep(0.1)
+        status = client.get("/api/batch/all/status").json()
+    return status
+
+
 def test_batch_all_processes_every_registered_trace(client_with_corpus):
     client, names, output_dir = client_with_corpus
 
     r = client.post("/api/batch/all")
     assert r.status_code == 200
     assert r.json()["total"] == 3
+    assert r.json()["mode"] == "fix"
 
-    deadline = time.time() + 10
-    status = client.get("/api/batch/all/status").json()
-    while status["running"] and time.time() < deadline:
-        time.sleep(0.1)
-        status = client.get("/api/batch/all/status").json()
-
+    status = _wait_for_batch_done(client)
     assert status["running"] is False
     assert status["done"] == 3
     assert status["failed"] == []
@@ -234,9 +239,82 @@ def test_batch_all_rejects_concurrent_start(client_with_corpus):
     r2 = client.post("/api/batch/all")
     assert r2.status_code == 409
 
-    deadline = time.time() + 10
-    status = client.get("/api/batch/all/status").json()
-    while status["running"] and time.time() < deadline:
-        time.sleep(0.1)
-        status = client.get("/api/batch/all/status").json()
+    status = _wait_for_batch_done(client)
     assert status["running"] is False
+
+
+def test_batch_all_rejects_unknown_mode(client_with_corpus):
+    client, _names, _output_dir = client_with_corpus
+    r = client.post("/api/batch/all", params={"mode": "bogus"})
+    assert r.status_code == 400
+
+
+def test_batch_all_catalog_mode_populates_catalog_without_writing_output(client_with_corpus):
+    client, names, output_dir = client_with_corpus
+
+    r = client.post("/api/batch/all", params={"mode": "catalog"})
+    assert r.status_code == 200
+    status = _wait_for_batch_done(client)
+    assert status["done"] == 3
+    assert status["failed"] == []
+
+    assert not (output_dir / "adma").exists()  # catalog-only: no fix/predict, nothing written to output/
+
+    r = client.get("/api/catalog")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["total"] == 3
+    assert {row["trace_id"] for row in data["rows"]} == set(names)
+    for row in data["rows"]:
+        assert row["processed_at"] is not None
+        assert row["vehicle_count"] == 5
+        assert row["first_lat"] is not None
+
+
+def test_batch_all_fix_catalog_mode_does_both(client_with_corpus):
+    client, names, output_dir = client_with_corpus
+
+    r = client.post("/api/batch/all", params={"mode": "fix_catalog"})
+    assert r.status_code == 200
+    status = _wait_for_batch_done(client)
+    assert status["done"] == 3
+    assert status["failed"] == []
+
+    for name in names:
+        assert (output_dir / "adma" / "ADMA" / name / "adma.csv").exists()
+
+    r = client.get("/api/catalog")
+    data = r.json()
+    assert data["total"] == 3
+    for row in data["rows"]:
+        assert row["processed_at"] is not None
+
+
+def test_catalog_query_filters_and_tags_endpoint(client_with_corpus):
+    client, names, _output_dir = client_with_corpus
+
+    r = client.get("/api/catalog/tags")
+    assert r.status_code == 200
+    tags = r.json()
+    assert "off_road" in tags["issue_categories"]
+    assert "cut_in" in tags["phenomena"]
+
+    client.post("/api/batch/all", params={"mode": "catalog"})
+    _wait_for_batch_done(client)
+
+    r = client.get("/api/catalog", params={"q": names[0]})
+    assert r.json()["total"] == 1
+
+    r = client.get("/api/catalog/stats")
+    assert r.json() == {"total": 3, "processed": 3}
+
+
+def test_scan_registers_identity_rows_in_catalog(client_with_corpus):
+    """The corpus fixture already scans as part of setup -- confirm that
+    alone (before any batch run) creates catalog rows, just unprocessed."""
+    client, names, _output_dir = client_with_corpus
+    r = client.get("/api/catalog")
+    data = r.json()
+    assert data["total"] == 3
+    assert {row["trace_id"] for row in data["rows"]} == set(names)
+    assert all(row["processed_at"] is None for row in data["rows"])

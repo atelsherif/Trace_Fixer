@@ -632,7 +632,32 @@ function wireControls() {
   });
   el("dir-browser-cancel").addEventListener("click", () => el("dir-browser").classList.add("hidden"));
 
-  el("scan-batch-all").addEventListener("click", runBatchAll);
+  el("scan-batch-catalog").addEventListener("click", () => runBatchAll("catalog"));
+  el("scan-batch-fix").addEventListener("click", () => runBatchAll("fix"));
+  el("scan-batch-fix-catalog").addEventListener("click", () => runBatchAll("fix_catalog"));
+
+  // -- catalog --
+  el("catalog-btn").addEventListener("click", openCatalog);
+  el("catalog-close").addEventListener("click", closeCatalog);
+  el("catalog-modal").addEventListener("click", (e) => {
+    if (e.target.id === "catalog-modal") closeCatalog();
+  });
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && !el("catalog-modal").classList.contains("hidden")) closeCatalog();
+  });
+  el("catalog-search").addEventListener("input", (e) => {
+    clearTimeout(catalogSearchDebounce);
+    catalogSearchDebounce = setTimeout(() => {
+      catalogState.q = e.target.value.trim();
+      loadCatalogPage(0);
+    }, 150);
+  });
+  el("catalog-page-prev").addEventListener("click", () => {
+    loadCatalogPage(Math.max(0, catalogState.offset - CATALOG_PAGE_SIZE));
+  });
+  el("catalog-page-next").addEventListener("click", () => {
+    loadCatalogPage(catalogState.offset + CATALOG_PAGE_SIZE);
+  });
 
   // -- playback --
   el("play-pause").addEventListener("click", togglePlayPause);
@@ -850,19 +875,30 @@ async function loadDirBrowser(path) {
   }
 }
 
-// ---------- Batch fix + predict ALL matched traces ----------
+// ---------- Batch ALL matched traces: catalog / fix / fix+catalog ----------
+
+const BATCH_ALL_BUTTON_IDS = ["scan-batch-catalog", "scan-batch-fix", "scan-batch-fix-catalog"];
+const BATCH_ALL_DONE_SUFFIX = {
+  catalog: "Catalog updated.",
+  fix: "Corrected files written to output/.",
+  fix_catalog: "Corrected files written to output/ and catalog updated.",
+};
 
 let batchAllPolling = null;
 
-async function runBatchAll() {
+function setBatchAllButtonsDisabled(disabled) {
+  for (const id of BATCH_ALL_BUTTON_IDS) el(id).disabled = disabled;
+}
+
+async function runBatchAll(mode) {
   try {
-    const r = await fetch("/api/batch/all", { method: "POST" });
+    const r = await fetch(`/api/batch/all?mode=${encodeURIComponent(mode)}`, { method: "POST" });
     const data = await r.json();
     if (!r.ok) {
       el("scan-batch-all-status").textContent = `Could not start: ${data.detail || r.status}`;
       return;
     }
-    el("scan-batch-all").disabled = true;
+    setBatchAllButtonsDisabled(true);
     el("scan-batch-all-status").textContent = `Starting: 0/${data.total}…`;
     pollBatchAllStatus();
   } catch (err) {
@@ -883,13 +919,189 @@ function pollBatchAllStatus() {
       return;
     }
     clearInterval(batchAllPolling);
-    el("scan-batch-all").disabled = false;
+    setBatchAllButtonsDisabled(false);
+    const doneSuffix = BATCH_ALL_DONE_SUFFIX[data.mode] || "";
     el("scan-batch-all-status").textContent =
       `Done: ${data.done}/${data.total} processed` +
       (data.failed.length ? `, ${data.failed.length} failed: ${data.failed.map((f) => f.trace_id).join(", ")}` : "") +
-      `. Corrected files written to output/.`;
+      (doneSuffix ? ` ${doneSuffix}` : "");
   }, 700);
 }
+
+// ---------- Catalog browser ----------
+
+const CATALOG_PAGE_SIZE = 200;
+
+const catalogState = {
+  q: "",
+  phenomena: new Set(),
+  issueCategories: new Set(),
+  offset: 0,
+  total: 0,
+};
+
+function humanizeTag(s) {
+  return s.replace(/_/g, " ");
+}
+
+async function loadCatalogTags() {
+  const data = await apiGet("/api/catalog/tags");
+
+  const phenomenonBox = el("catalog-phenomenon-filters");
+  phenomenonBox.innerHTML = "";
+  for (const name of data.phenomena) {
+    phenomenonBox.appendChild(buildCatalogChipToggle(name, catalogState.phenomena));
+  }
+
+  const issueBox = el("catalog-issue-filters");
+  issueBox.innerHTML = "";
+  for (const name of data.issue_categories) {
+    issueBox.appendChild(buildCatalogChipToggle(name, catalogState.issueCategories));
+  }
+}
+
+function buildCatalogChipToggle(name, targetSet) {
+  const chip = document.createElement("button");
+  chip.type = "button";
+  chip.className = "catalog-chip-toggle";
+  chip.textContent = humanizeTag(name);
+  chip.addEventListener("click", () => {
+    if (targetSet.has(name)) targetSet.delete(name); else targetSet.add(name);
+    chip.classList.toggle("active");
+    loadCatalogPage(0);
+  });
+  return chip;
+}
+
+async function loadCatalogStats() {
+  const data = await apiGet("/api/catalog/stats");
+  el("catalog-stats").textContent = `${data.processed} of ${data.total} trace(s) cataloged`;
+}
+
+async function loadCatalogPage(offset) {
+  const params = new URLSearchParams({ limit: String(CATALOG_PAGE_SIZE), offset: String(offset) });
+  if (catalogState.q) params.set("q", catalogState.q);
+  for (const p of catalogState.phenomena) params.append("phenomenon", p);
+  for (const c of catalogState.issueCategories) params.append("issue_category", c);
+
+  const data = await apiGet(`/api/catalog?${params.toString()}`);
+  catalogState.offset = offset;
+  catalogState.total = data.total;
+  renderCatalogTable(data.rows);
+  renderCatalogFooter(data.rows.length);
+}
+
+function renderCatalogFooter(shownCount) {
+  const { offset, total } = catalogState;
+  const shownStart = shownCount ? offset + 1 : 0;
+  const shownEnd = offset + shownCount;
+  el("catalog-footer-label").textContent =
+    total > 0 ? `Showing ${shownStart}–${shownEnd} of ${total} trace(s).` : "No matching traces.";
+  const pageCount = Math.max(1, Math.ceil(total / CATALOG_PAGE_SIZE));
+  const pageNum = Math.floor(offset / CATALOG_PAGE_SIZE) + 1;
+  el("catalog-page-label").textContent = pageCount > 1 ? `Page ${pageNum} of ${pageCount}` : "";
+  el("catalog-page-prev").disabled = offset <= 0;
+  el("catalog-page-next").disabled = shownEnd >= total;
+}
+
+function renderCatalogTable(rows) {
+  const tbody = el("catalog-tbody");
+  tbody.innerHTML = "";
+  if (!rows.length) {
+    const tr = document.createElement("tr");
+    const td = document.createElement("td");
+    td.colSpan = 8;
+    td.className = "catalog-table-empty";
+    td.textContent = "No traces match these filters.";
+    tr.appendChild(td);
+    tbody.appendChild(tr);
+    return;
+  }
+
+  for (const row of rows) {
+    const tr = document.createElement("tr");
+
+    const nameTd = document.createElement("td");
+    nameTd.textContent = row.trace_id;
+    tr.appendChild(nameTd);
+
+    const locTd = document.createElement("td");
+    locTd.textContent =
+      row.first_lat != null && row.first_lon != null ? `${row.first_lat.toFixed(5)}, ${row.first_lon.toFixed(5)}` : "—";
+    tr.appendChild(locTd);
+
+    const durTd = document.createElement("td");
+    durTd.textContent = row.duration_s != null ? `${row.duration_s.toFixed(1)}s` : "—";
+    tr.appendChild(durTd);
+
+    const vehTd = document.createElement("td");
+    vehTd.textContent = row.vehicle_count != null ? row.vehicle_count : "—";
+    tr.appendChild(vehTd);
+
+    const condTd = document.createElement("td");
+    condTd.textContent = [row.road_type, row.weather, row.light_conditions].filter(Boolean).join(" / ") || "—";
+    tr.appendChild(condTd);
+
+    const phenomenaTd = document.createElement("td");
+    if (row.phenomena.length) {
+      for (const p of row.phenomena) {
+        const tag = document.createElement("span");
+        tag.className = "catalog-tag phenomenon";
+        tag.textContent = `${humanizeTag(p.phenomenon)} ×${p.count}`;
+        phenomenaTd.appendChild(tag);
+      }
+    } else if (row.processed_at) {
+      phenomenaTd.textContent = "none";
+    } else {
+      phenomenaTd.textContent = "not yet cataloged";
+    }
+    tr.appendChild(phenomenaTd);
+
+    const issuesTd = document.createElement("td");
+    if (row.issues.length) {
+      for (const iss of row.issues) {
+        const tag = document.createElement("span");
+        tag.className = "catalog-tag issue";
+        tag.textContent = `${humanizeTag(iss.category)} (${iss.severity}) ×${iss.count}`;
+        issuesTd.appendChild(tag);
+      }
+    } else if (row.processed_at) {
+      issuesTd.textContent = "none";
+    } else {
+      issuesTd.textContent = "not yet cataloged";
+    }
+    tr.appendChild(issuesTd);
+
+    const openTd = document.createElement("td");
+    const openBtn = document.createElement("button");
+    openBtn.textContent = "Open";
+    openBtn.addEventListener("click", async () => {
+      closeCatalog();
+      await loadTrace(row.trace_id);
+    });
+    openTd.appendChild(openBtn);
+    tr.appendChild(openTd);
+
+    tbody.appendChild(tr);
+  }
+}
+
+let catalogTagsLoaded = false;
+
+async function openCatalog() {
+  el("catalog-modal").classList.remove("hidden");
+  if (!catalogTagsLoaded) {
+    await loadCatalogTags();
+    catalogTagsLoaded = true;
+  }
+  await Promise.all([loadCatalogStats(), loadCatalogPage(0)]);
+}
+
+function closeCatalog() {
+  el("catalog-modal").classList.add("hidden");
+}
+
+let catalogSearchDebounce = null;
 
 async function init() {
   resizeCanvas();
@@ -898,7 +1110,7 @@ async function init() {
   try {
     const status = await apiGet("/api/batch/all/status");
     if (status.running) {
-      el("scan-batch-all").disabled = true;
+      setBatchAllButtonsDisabled(true);
       el("scan-batch-all-status").textContent = `Processing ${status.done}/${status.total}…`;
       pollBatchAllStatus();
     }
