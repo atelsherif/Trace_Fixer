@@ -65,6 +65,21 @@ def test_scene_json_ego_path_has_gps_coordinates(trace):
     assert -180 <= first["lon"] <= 180
 
 
+def test_scene_json_ego_path_velocity_is_rotated_into_vehicle_frame(trace):
+    """sample1 is steady-state highway cruising (near-zero heading rate,
+    negligible side-slip) -- see test_heading_matches_velocity_direction,
+    which the same (vy_mps, vx_mps) = (East, North) axis mapping comes
+    from. So forward velocity should track total speed almost exactly, and
+    lateral velocity should stay near zero -- unlike the raw North/East
+    components, which don't decompose that way at all."""
+    from trace_fixer.scene import build_scene_json
+
+    scene = build_scene_json(trace)
+    for p in scene["ego"]["path"][::50]:
+        assert abs(p["v_fwd_mps"] - p["speed_mps"]) < 0.01
+        assert abs(p["v_lat_mps"]) < 0.5
+
+
 def test_scene_json_events_match_sample1s_known_phenomena(trace):
     """sample1 has one near-miss/cut-in (vehicle 2) and three overtakes
     (vehicles 1, 4, 5) -- see test_analysis.py -- confirm the scene JSON

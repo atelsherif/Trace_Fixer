@@ -7,6 +7,7 @@ from pathlib import Path
 
 from trace_fixer.analysis import build_trace_summary
 from trace_fixer.geo.populate import populate_global_coords
+from trace_fixer.geo.transform import global_to_ego_relative, heading_to_yaw_rad
 from trace_fixer.models import Trace
 from trace_fixer.parsers.adma_csv import parse_adma_csv
 from trace_fixer.parsers.annotation_xml import parse_annotation_xml
@@ -126,6 +127,12 @@ def build_scene_json(trace: Trace, max_ego_points: int = 1500) -> dict:
 
     ego_path = []
     for pose in _downsample(trace.ego.poses, max_ego_points):
+        # vx_mps/vy_mps are North/East velocity, not vehicle-frame forward/
+        # lateral despite the field names (see models.EgoPose) -- rotate
+        # into the vehicle frame with the same helper used for annotation
+        # coordinates, passing (East, North) = (vy_mps, vx_mps).
+        yaw_rad = heading_to_yaw_rad(pose.heading_deg)
+        v_fwd, v_lat = global_to_ego_relative(pose.vy_mps, pose.vx_mps, 0.0, 0.0, yaw_rad)
         ego_path.append(
             {
                 "t_s": (pose.t_us - t0) / 1e6,
@@ -133,6 +140,9 @@ def build_scene_json(trace: Trace, max_ego_points: int = 1500) -> dict:
                 "y": pose.y_m,
                 "heading_deg": (90 + pose.heading_deg) % 360,
                 "speed_mps": math.hypot(pose.vx_mps, pose.vy_mps),
+                "v_fwd_mps": v_fwd,
+                "v_lat_mps": v_lat,
+                "v_vert_mps": pose.vz_mps,
                 "lat": pose.lat_deg,
                 "lon": pose.lon_deg,
             }

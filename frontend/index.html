@@ -86,32 +86,48 @@
         <h2>Ego Odometry</h2>
         <div class="stat-row"><span class="stat-label">Elapsed</span><span id="odo-time" class="stat-value">0.00 s</span></div>
         <div class="stat-row"><span class="stat-label">Speed</span><span id="odo-speed" class="stat-value">&mdash;</span></div>
+        <div class="stat-row"><span class="stat-label">Velocity (fwd/lat/vert)</span><span id="odo-velocity" class="stat-value">&mdash;</span></div>
         <div class="stat-row"><span class="stat-label">Heading</span><span id="odo-heading" class="stat-value">&mdash;</span></div>
         <div class="stat-row"><span class="stat-label">Distance traveled</span><span id="odo-distance" class="stat-value">&mdash;</span></div>
+      </div>
+
+      <div class="panel-block">
+        <h2>Vehicles <span id="vehicle-count" class="badge">0</span></h2>
+        <ul id="vehicle-list" class="issue-list vehicle-list"></ul>
+      </div>
+
+      <div class="panel-block">
+        <h2>Events <span id="event-count" class="badge">0</span></h2>
+        <ul id="event-list" class="issue-list event-list"></ul>
       </div>
     </aside>
 
     <section class="viewport-panel">
-      <canvas id="viewport"></canvas>
-      <div class="viewport-overlay">
-        <div class="viewport-controls">
-          <button id="zoom-in" title="Zoom in">+</button>
-          <button id="zoom-out" title="Zoom out">&minus;</button>
-          <button id="recenter" title="Recenter on ego">&#8853;</button>
-          <label class="checkbox-field"><input id="heading-up" type="checkbox" checked /> Lock heading up</label>
-          <label class="checkbox-field"><input id="show-lanes" type="checkbox" checked /> Lanes</label>
-          <label class="checkbox-field"><input id="show-static" type="checkbox" /> Static objects</label>
-        </div>
-        <div class="legend">
-          <span><i class="swatch ego"></i>Ego</span>
-          <span><i class="swatch vehicle"></i>Vehicle</span>
-          <span><i class="swatch predicted"></i>Predicted</span>
-          <span><i class="swatch flagged"></i>Flagged</span>
-        </div>
+      <div class="viewport-titlebar">
+        <span id="viewport-trace-name">No trace loaded</span>
       </div>
-      <button id="gps-readout" class="gps-readout" title="Click to copy ego GPS coordinates">
-        <span id="gps-readout-text">Lat —, Lon —</span>
-      </button>
+      <div class="viewport-canvas-wrap">
+        <canvas id="viewport"></canvas>
+        <div class="viewport-overlay">
+          <div class="viewport-controls">
+            <button id="zoom-in" title="Zoom in">+</button>
+            <button id="zoom-out" title="Zoom out">&minus;</button>
+            <button id="recenter" title="Recenter on ego">&#8853;</button>
+            <label class="checkbox-field"><input id="heading-up" type="checkbox" checked /> Lock heading up</label>
+            <label class="checkbox-field"><input id="show-lanes" type="checkbox" checked /> Lanes</label>
+            <label class="checkbox-field"><input id="show-static" type="checkbox" /> Static objects</label>
+          </div>
+          <div class="legend">
+            <span><i class="swatch ego"></i>Ego</span>
+            <span><i class="swatch vehicle"></i>Vehicle</span>
+            <span><i class="swatch predicted"></i>Predicted</span>
+            <span><i class="swatch flagged"></i>Flagged</span>
+          </div>
+        </div>
+        <button id="gps-readout" class="gps-readout" title="Click to copy ego GPS coordinates">
+          <span id="gps-readout-text">Lat —, Lon —</span>
+        </button>
+      </div>
     </section>
 
     <aside class="side-panel side-panel-right">
@@ -132,16 +148,6 @@
           <span id="sync-offset-value">0</span>
         </div>
         <p id="status-line" class="status-line"></p>
-      </div>
-
-      <div class="panel-block">
-        <h2>Vehicles <span id="vehicle-count" class="badge">0</span></h2>
-        <ul id="vehicle-list" class="issue-list vehicle-list"></ul>
-      </div>
-
-      <div class="panel-block">
-        <h2>Events <span id="event-count" class="badge">0</span></h2>
-        <ul id="event-list" class="issue-list event-list"></ul>
       </div>
 
       <div class="panel-block issues-block">

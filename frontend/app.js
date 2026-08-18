@@ -154,6 +154,7 @@ function onTraceSearchInput(value) {
 async function loadTrace(traceId) {
   state.traceId = traceId;
   el("trace-picker-label").textContent = traceId;
+  el("viewport-trace-name").textContent = traceId;
   const scene = await apiGet(`/api/traces/${traceId}/scene`);
   applyScene(scene);
   state.timeS = 0;
@@ -272,6 +273,9 @@ function egoAt(t) {
     y: a.y + (b.y - a.y) * f,
     heading_deg: lerpHeadingDeg(a.heading_deg, b.heading_deg, f),
     speed_mps: a.speed_mps + (b.speed_mps - a.speed_mps) * f,
+    v_fwd_mps: a.v_fwd_mps + (b.v_fwd_mps - a.v_fwd_mps) * f,
+    v_lat_mps: a.v_lat_mps + (b.v_lat_mps - a.v_lat_mps) * f,
+    v_vert_mps: a.v_vert_mps + (b.v_vert_mps - a.v_vert_mps) * f,
     lat: a.lat + (b.lat - a.lat) * f,
     lon: a.lon + (b.lon - a.lon) * f,
     dist_m: a.dist_m + (b.dist_m - a.dist_m) * f,
@@ -474,6 +478,8 @@ function updateOdometry(ego) {
   el("odo-time").textContent = `${state.timeS.toFixed(2)} s`;
   if (!ego) return;
   el("odo-speed").textContent = `${ego.speed_mps.toFixed(1)} m/s (${(ego.speed_mps * 3.6).toFixed(0)} km/h)`;
+  el("odo-velocity").textContent =
+    `${ego.v_fwd_mps.toFixed(1)} / ${ego.v_lat_mps.toFixed(1)} / ${ego.v_vert_mps.toFixed(1)} m/s`;
   const bearing = yawToCompassBearing(ego.heading_deg);
   el("odo-heading").textContent = `${bearing.toFixed(0)}° ${compassLabel(bearing)}`;
   const distM = ego.dist_m || 0;

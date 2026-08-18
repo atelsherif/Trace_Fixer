@@ -9,10 +9,19 @@ class EgoPose:
     t_us: int  # ADTF chunk time, microseconds, ADMA clock
     lat_deg: float
     lon_deg: float
-    heading_deg: float  # 0..360, clockwise from north (ADMA convention)
-    vx_mps: float  # forward velocity, vehicle frame
-    vy_mps: float  # lateral velocity, vehicle frame
-    vz_mps: float
+    # 0..360, *counterclockwise* from north -- the opposite rotational sense
+    # of a normal compass bearing; see geo/transform.py's module docstring
+    # for how this was verified and how to convert back to a compass bearing.
+    heading_deg: float
+    # Despite the field names, these are INS_Vel_Frame_X/Y -- North/East
+    # velocity components in a local-level nav frame, *not* vehicle-frame
+    # forward/lateral velocity (verified the same way as heading_deg above;
+    # see geo/transform.py). Use geo.transform.global_to_ego_relative on
+    # (vy_mps, vx_mps) -- i.e. (East, North) -- with the pose's yaw to get
+    # genuine forward/lateral vehicle-frame velocity.
+    vx_mps: float
+    vy_mps: float
+    vz_mps: float  # INS_Vel_Frame_Z; sign convention (up vs. down) not verified
     x_m: float = 0.0  # local ENU, filled in by geo.transform
     y_m: float = 0.0
 

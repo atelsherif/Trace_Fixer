@@ -50,11 +50,12 @@ python3 -m pytest
 
 ## Using the GUI
 
-The right-hand panel is where you inspect and fix a trace; a left-hand
-**Ego Odometry** panel shows a few raw, always-cheap-to-compute ego stats
-(elapsed time, speed, compass heading, distance traveled) as the trace
-plays — nothing that requires re-running validation or analysis, so it
-updates every frame for free.
+The layout is three columns. A thin titlebar above the viewport names the
+currently loaded trace. The **left** panel is the "what is this trace"
+side — an **Ego Odometry** readout plus the Vehicles and Events lists,
+none of which require re-running validation or analysis, so they're cheap
+to keep visible while you scrub through playback. The **right** panel is
+the "do something about it" side — validate, predict, fix, and export.
 
 1. **Pick a trace** from the trace picker (top bar) — it's a searchable
    list, not a plain dropdown, so it stays usable with a corpus of
@@ -64,38 +65,42 @@ updates every frame for free.
    filter, stepping stays within those filtered results. The list itself
    is paginated 200 at a time; use the **◀ / ▶** page controls below it to
    page through a larger corpus (searching narrows the page count too).
-2. **Vehicles panel** lists every vehicle in the scene (id, object type, and
-   the time range it's observed over). Click a vehicle to jump the timeline
-   to its first observation, highlight it in the viewport with the same
-   blue selection ring used for issue clicks, resume playback, and keep the
-   camera centered on it as it moves. Click the same vehicle again to
-   deselect it — the ring disappears and the camera goes back to following
-   the ego.
-3. **Events panel** lists the behavioral events detected in the trace —
-   braking, overtakes, short-headway/near-miss, cut-ins, standstills, sharp
-   turns; see *Trace catalog* below for what each one means. Click one to
-   jump the timeline to it and highlight the vehicle involved (or the ego,
-   for an ego-only event like braking or a standstill). This is a different
-   list from Issues below: events are "what happened," issues are "what's
-   wrong."
-4. **Run validation** to flag implausible vehicle motion, collisions, and
-   off-road excursions in the issue list. Click an issue to jump the
-   timeline to it and highlight the vehicle.
-5. **Predict outside FOV** extrapolates a plausible path for any vehicle
+2. **Ego Odometry** (left panel) shows elapsed time, speed, forward/
+   lateral/vertical velocity, compass heading, and distance traveled —
+   see *Coordinate & unit conventions* below for what forward/lateral/
+   vertical actually mean (it's not simply the raw ADMA velocity channels).
+3. **Vehicles panel** (left) lists every vehicle in the scene (id, object
+   type, and the time range it's observed over). Click a vehicle to jump
+   the timeline to its first observation, highlight it in the viewport with
+   the same blue selection ring used for issue clicks, resume playback, and
+   keep the camera centered on it as it moves. Click the same vehicle again
+   to deselect it — the ring disappears and the camera goes back to
+   following the ego.
+4. **Events panel** (left) lists the behavioral events detected in the
+   trace — braking, overtakes, short-headway/near-miss, cut-ins,
+   standstills, sharp turns; see *Trace catalog* below for what each one
+   means. Click one to jump the timeline to it and highlight the vehicle
+   involved (or the ego, for an ego-only event like braking or a
+   standstill). This is a different list from Issues: events are "what
+   happened," issues are "what's wrong."
+5. **Run validation** (right panel) to flag implausible vehicle motion,
+   collisions, and off-road excursions in the issue list. Click an issue to
+   jump the timeline to it and highlight the vehicle.
+6. **Predict outside FOV** extrapolates a plausible path for any vehicle
    before it entered the ~120° front-bumper Lidar cone (already moving when
    first observed) *and* after it left the cone (most commonly the ego
    overtaking it, or it overtaking the ego, while it's presumably still on
    the road). Predicted segments render dashed/purple and are excluded from
    export unless you ask for them (`include_predictions` on the annotation
    export).
-6. **Apply fixes** smooths flagged vehicle tracks, clamps positions back
+7. **Apply fixes** smooths flagged vehicle tracks, clamps positions back
    inside the annotated road corridor, and drops trailing observations that
    still overlap the ego vehicle after smoothing (a common "lost the track
    right as it merged into our lane" artifact). Re-run validation any time
    to see what's left.
-7. **Sync offset** nudges the annotation clock against the ADMA clock (see
+8. **Sync offset** nudges the annotation clock against the ADMA clock (see
    *Time alignment* below) — drag while watching the replay.
-8. **Export** the fixed ADMA CSV, fixed annotation XML, an
+9. **Export** the fixed ADMA CSV, fixed annotation XML, an
    OpenDRIVE + OpenSCENARIO `.zip`, or a **trace summary** (`.txt` or
    `.xml`) — see *Trace summary report* below. Every export writes into
    `output/` and never triggers a browser download — see *Output directory*
@@ -339,6 +344,13 @@ displacement over time:
 - `INS_Vel_Frame_X` / `_Y` / `_Z`: LSB `0.005` m/s (per the manual) — **and**
   X/Y are **North/East** local-level-frame components, not vehicle-frame
   forward/lateral velocity, despite the "Frame" name suggesting otherwise.
+  The GUI's Ego Odometry panel shows genuine forward/lateral vehicle-frame
+  velocity, computed by rotating `(INS_Vel_Frame_Y, INS_Vel_Frame_X)` —
+  i.e. `(East, North)` — into the vehicle frame using the pose's heading,
+  the same rotation used to place annotation boxes; see `scene.py`. Sanity
+  check on the (steady, near-zero-slip highway) sample traces: forward
+  velocity matches total speed to within centimeters/second and lateral
+  velocity stays under ~0.1 m/s throughout.
 - `INS_ANGLE_TRUE_HEADING`: LSB `0.01` deg (per the manual, same convention
   as `Tilt_Yaw`/`GPS_Course_Over_Ground`) — **and** it turns out to be a
   counterclockwise-from-north angle, the opposite rotational sense of a
