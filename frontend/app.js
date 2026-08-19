@@ -11,6 +11,7 @@ const state = {
   camera: { zoom: 8, followEgo: true, followVehicleId: null, centerX: 0, centerY: 0, headingUp: true },
   drag: null,
   selectedVehicleId: null,
+  selectedStaticObjectId: null,
   showLanes: true,
   showStatic: false,
   showMapOverlay: false,
@@ -172,6 +173,7 @@ async function loadTrace(traceId) {
   applyScene(scene);
   state.timeS = 0;
   state.selectedVehicleId = null;
+  state.selectedStaticObjectId = null;
   state.camera.followEgo = true;
   state.camera.followVehicleId = null;
   state.mapOverlay = null;
@@ -253,6 +255,7 @@ function applyScene(scene) {
   if (state.timeS > scene.duration_s) state.timeS = 0;
   renderIssueList();
   renderVehicleList();
+  renderStaticObjectList();
   renderEventList();
   updateTimeLabel();
 }
@@ -376,7 +379,7 @@ function draw() {
   if (state.showLanes) drawLines(ctx, state.scene.lane_markings, "#4a5568", lineWidthWorld, false);
   drawLines(ctx, state.scene.border_lines, "#c98a3c", lineWidthWorld * 1.6, true);
 
-  if (state.showStatic) drawStatic(ctx, state.scene.static_objects, lineWidthWorld);
+  if (state.showStatic) drawStatic(ctx, state.scene.static_objects, lineWidthWorld, state.selectedStaticObjectId);
 
   const flagged = activeIssuesAt(state.timeS);
   for (const vehicle of state.scene.vehicles) {
@@ -447,7 +450,7 @@ function drawMapOverlay(ctx, ways, lineWidthWorld) {
   ctx.restore();
 }
 
-function drawStatic(ctx, objects, lineWidthWorld) {
+function drawStatic(ctx, objects, lineWidthWorld, selectedId) {
   ctx.save();
   ctx.fillStyle = "#5a6478";
   for (const obj of objects) {
@@ -455,6 +458,17 @@ function drawStatic(ctx, objects, lineWidthWorld) {
       ctx.beginPath();
       ctx.arc(o.x, o.y, Math.max(0.3, o.width / 2), 0, Math.PI * 2);
       ctx.fill();
+    }
+  }
+  if (selectedId != null) {
+    const selected = objects.find((obj) => obj.id === selectedId);
+    if (selected && selected.observations.length) {
+      const o = selected.observations[0];
+      ctx.strokeStyle = "#4da3ff";
+      ctx.lineWidth = 2.5 * lineWidthWorld;
+      ctx.beginPath();
+      ctx.arc(o.x, o.y, Math.max(1.5, o.width), 0, Math.PI * 2);
+      ctx.stroke();
     }
   }
   ctx.restore();
@@ -624,6 +638,60 @@ function renderVehicleList() {
       }
       updateTimeLabel();
       renderVehicleList();
+      draw();
+    });
+    list.appendChild(li);
+  }
+}
+
+// ---------- Static object list ----------
+
+function renderStaticObjectList() {
+  const list = el("static-object-list");
+  list.innerHTML = "";
+  const objects = state.scene.static_objects;
+  el("static-object-count").textContent = objects.length;
+  if (!objects.length) {
+    const li = document.createElement("li");
+    li.className = "issue-empty";
+    li.textContent = "No static objects in this scene.";
+    list.appendChild(li);
+    return;
+  }
+  for (const obj of objects) {
+    const obs = obj.observations;
+    const li = document.createElement("li");
+    li.className = `issue-item static-object-item${state.selectedStaticObjectId === obj.id ? " selected" : ""}`;
+    const meta = document.createElement("div");
+    meta.className = "issue-meta";
+    meta.textContent = `obj ${obj.id} · ${obj.obj_type}`;
+    const desc = document.createElement("div");
+    desc.textContent = obs.length ? `first seen t=${obs[0].t_s.toFixed(1)}s` : "no observations";
+    li.appendChild(meta);
+    li.appendChild(desc);
+    li.addEventListener("click", () => {
+      if (state.selectedStaticObjectId === obj.id) {
+        // clicking the already-selected object again deselects it and
+        // hands the camera back to following the ego
+        state.selectedStaticObjectId = null;
+        state.camera.followEgo = true;
+      } else {
+        state.selectedStaticObjectId = obj.id;
+        state.camera.followEgo = false;
+        state.camera.followVehicleId = null;
+        if (obs.length) {
+          // static objects don't move, so just re-center the camera on it
+          // once and leave playback running -- lets you watch the ego and
+          // traffic move past a fixed point instead of jumping the clock.
+          state.camera.centerX = obs[0].x;
+          state.camera.centerY = obs[0].y;
+        }
+        if (!state.showStatic) {
+          state.showStatic = true;
+          el("show-static").checked = true;
+        }
+      }
+      renderStaticObjectList();
       draw();
     });
     list.appendChild(li);
@@ -1103,6 +1171,7 @@ function collectBatchRunOptions() {
     predict_trajectories: el("scan-opt-predict").checked,
     export_fixed_trace: el("scan-opt-export-fixed").checked,
     export_opendrive: el("scan-opt-export-opendrive").checked,
+    enrich: el("scan-opt-enrich-osm").checked ? "osm" : null,
     export_openscenario: el("scan-opt-export-openscenario").checked,
     export_adp_yaml: el("scan-opt-export-adp").checked,
     export_report_txt: el("scan-opt-export-report-txt").checked,
@@ -1117,7 +1186,7 @@ function batchRunDoneMessage(opts) {
   if (opts.predict_trajectories) did.push("predicted trajectories");
   const wrote = [];
   if (opts.export_fixed_trace) wrote.push("Fixed Trace");
-  if (opts.export_opendrive) wrote.push("OpenDRIVE");
+  if (opts.export_opendrive) wrote.push(opts.enrich ? "OpenDRIVE (OSM enrichment requested)" : "OpenDRIVE");
   if (opts.export_openscenario) wrote.push("OpenSCENARIO");
   if (opts.export_adp_yaml) wrote.push("ADP scenario");
   if (opts.export_report_txt) wrote.push("summary .txt");

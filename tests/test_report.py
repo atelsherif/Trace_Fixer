@@ -31,6 +31,15 @@ def test_txt_report_includes_scene_composition_and_issues(validated_trace):
         assert issue.description in text
 
 
+def test_txt_report_includes_static_objects(validated_trace):
+    from trace_fixer.export.report import generate_txt_report
+
+    text = generate_txt_report(validated_trace)
+    assert "Static objects: 38 object(s)" in text
+    assert "Traffic Sign: 16" in text
+    assert "Highly Reflective Marker: 22" in text
+
+
 def test_txt_report_includes_overtake_events(validated_trace):
     from trace_fixer.export.report import generate_txt_report
 
@@ -60,6 +69,11 @@ def test_xml_report_is_well_formed_and_complete(validated_trace):
     assert int(scene_el.attrib["totalObjects"]) == 5
     types = {el.attrib["type"]: int(el.attrib["count"]) for el in scene_el.findall("ObjectType")}
     assert types == {"Truck": 4, "Car": 1}
+
+    static_el = root.find("StaticObjects")
+    assert int(static_el.attrib["totalObjects"]) == 38
+    static_types = {el.attrib["type"]: int(el.attrib["count"]) for el in static_el.findall("ObjectType")}
+    assert static_types == {"Traffic Sign": 16, "Highly Reflective Marker": 22}
 
     overtakes = root.find("OvertakeEvents").findall("OvertakeEvent")
     assert len(overtakes) == 3

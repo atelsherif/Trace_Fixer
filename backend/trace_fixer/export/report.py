@@ -1,7 +1,8 @@
-"""Trace summary export (txt / xml): scene composition (object counts by
-type), ego braking events, overtake events, and data-quality issues found
-by validation -- a standalone report meant for a QA/review team to triage a
-trace without opening the annotation XML or replaying it in the GUI.
+"""Trace summary export (txt / xml): scene composition (moving-object and
+static-object counts by type), ego braking events, overtake events, and
+data-quality issues found by validation -- a standalone report meant for a
+QA/review team to triage a trace without opening the annotation XML or
+replaying it in the GUI.
 """
 from __future__ import annotations
 
@@ -55,6 +56,11 @@ def generate_txt_report(trace: Trace) -> str:
         f"Scene composition: {sum(summary.object_counts.values())} object(s)",
     ]
     for obj_type, n in sorted(summary.object_counts.items()):
+        lines.append(f"  {obj_type}: {n}")
+    lines.append("")
+
+    lines.append(f"Static objects: {sum(summary.static_object_counts.values())} object(s)")
+    for obj_type, n in sorted(summary.static_object_counts.items()):
         lines.append(f"  {obj_type}: {n}")
     lines.append("")
 
@@ -130,6 +136,10 @@ def generate_xml_report(trace: Trace) -> str:
     scene_el = SubElement(root, "SceneComposition", {"totalObjects": str(sum(summary.object_counts.values()))})
     for obj_type, n in sorted(summary.object_counts.items()):
         SubElement(scene_el, "ObjectType", {"type": obj_type, "count": str(n)})
+
+    static_el = SubElement(root, "StaticObjects", {"totalObjects": str(sum(summary.static_object_counts.values()))})
+    for obj_type, n in sorted(summary.static_object_counts.items()):
+        SubElement(static_el, "ObjectType", {"type": obj_type, "count": str(n)})
 
     braking_el = SubElement(root, "BrakingEvents", {"count": str(len(summary.braking_events))})
     for ev in summary.braking_events:

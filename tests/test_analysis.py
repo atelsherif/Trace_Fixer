@@ -31,6 +31,13 @@ def test_count_objects_by_type(sample1):
     assert count_objects_by_type(sample1) == {"Truck": 4, "Car": 1}
 
 
+def test_count_static_objects_by_type(sample1):
+    from trace_fixer.analysis import count_static_objects_by_type
+
+    assert count_static_objects_by_type(sample1) == {"Traffic Sign": 16, "Highly Reflective Marker": 22}
+    assert sum(count_static_objects_by_type(sample1).values()) == len(sample1.annotation.static_objects)
+
+
 def test_neither_sample_has_real_braking_events(sample1, sample2):
     """Both bundled samples are steady-state highway driving (confirmed by
     inspecting their speed profiles): this is a negative-case check that the
@@ -92,6 +99,7 @@ def test_build_trace_summary_combines_all_three(sample1):
 
     summary = build_trace_summary(sample1)
     assert summary.object_counts == {"Truck": 4, "Car": 1}
+    assert summary.static_object_counts == {"Traffic Sign": 16, "Highly Reflective Marker": 22}
     assert summary.braking_events == []
     assert len(summary.overtake_events) == 3
 

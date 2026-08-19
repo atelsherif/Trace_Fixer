@@ -52,10 +52,11 @@ python3 -m pytest
 
 The layout is three columns. A thin titlebar above the viewport names the
 currently loaded trace. The **left** panel is the "what is this trace"
-side — an **Ego Odometry** readout plus the Vehicles and Events lists,
-none of which require re-running validation or analysis, so they're cheap
-to keep visible while you scrub through playback. The **right** panel is
-the "do something about it" side — validate, predict, fix, and export.
+side — an **Ego Odometry** readout plus the Vehicles, Static Objects, and
+Events lists, none of which require re-running validation or analysis, so
+they're cheap to keep visible while you scrub through playback. The
+**right** panel is the "do something about it" side — validate, predict,
+fix, and export.
 
 1. **Pick a trace** from the trace picker (top bar) — it's a searchable
    list, not a plain dropdown, so it stays usable with a corpus of
@@ -76,41 +77,50 @@ the "do something about it" side — validate, predict, fix, and export.
    keep the camera centered on it as it moves. Click the same vehicle again
    to deselect it — the ring disappears and the camera goes back to
    following the ego.
-4. **Events panel** (left) lists the behavioral events detected in the
+4. **Static Objects panel** (left) lists every static object (traffic
+   signs, reflective markers, and similar roadside fixtures the annotation
+   carries) in the scene, same shape as the Vehicles panel (id + type).
+   Since these don't move, clicking one doesn't touch the timeline or
+   playback — it re-centers the camera on the object once (turning off
+   ego-follow so it stays put while the trace keeps playing) and draws a
+   blue highlight ring around it, enabling the **Static objects** viewport
+   checkbox first if it was off. Click the same object again to deselect it
+   and hand the camera back to following the ego.
+5. **Events panel** (left) lists the behavioral events detected in the
    trace — braking, overtakes, short-headway/near-miss, cut-ins,
    standstills, sharp turns; see *Trace catalog* below for what each one
    means. Click one to jump the timeline to it and highlight the vehicle
    involved (or the ego, for an ego-only event like braking or a
    standstill). This is a different list from Issues: events are "what
    happened," issues are "what's wrong."
-5. **Run validation** (right panel) to flag implausible vehicle motion,
+6. **Run validation** (right panel) to flag implausible vehicle motion,
    collisions, and off-road excursions in the issue list. Click an issue to
    jump the timeline to it and highlight the vehicle.
-6. **Predict outside FOV** extrapolates a plausible path for any vehicle
+7. **Predict outside FOV** extrapolates a plausible path for any vehicle
    before it entered the ~120° front-bumper Lidar cone (already moving when
    first observed) *and* after it left the cone (most commonly the ego
    overtaking it, or it overtaking the ego, while it's presumably still on
    the road). Predicted segments render dashed/purple and are excluded from
    export unless you ask for them (`include_predictions` on the annotation
    export).
-7. **Apply fixes** smooths flagged vehicle tracks, clamps positions back
+8. **Apply fixes** smooths flagged vehicle tracks, clamps positions back
    inside the annotated road corridor, and drops trailing observations that
    still overlap the ego vehicle after smoothing (a common "lost the track
    right as it merged into our lane" artifact). Re-run validation any time
    to see what's left.
-8. **Sync offset** nudges the annotation clock against the ADMA clock (see
+9. **Sync offset** nudges the annotation clock against the ADMA clock (see
    *Time alignment* below) — drag while watching the replay.
-9. **Export**, one artifact type per button: **Fixed Trace
-   (ADMA+Annotation)** writes both the corrected ADMA CSV and annotation XML
-   in one action; **OpenDRIVE** (with the **Enrich with OpenStreetMap
-   (online)** checkbox next to it — optional, off by default, see *Online
-   map enrichment* below for what it does and doesn't affect); **OpenSCENARIO**
-   and **ADP scenario (.scn.yaml)** (for ADP, which doesn't read `.xosc` —
-   see *ADP YAML export* below, including the optional **Map key** field
-   above the two); and a **trace summary** as `.txt` or `.xml` — see *Trace
-   summary report* below. Every export writes into `output/` and never
-   triggers a browser download — see *Output directory* below.
-10. **Map (OSM)** (viewport controls, top-left of the canvas) overlays
+10. **Export**, one artifact type per button: **Fixed Trace
+    (ADMA+Annotation)** writes both the corrected ADMA CSV and annotation XML
+    in one action; **OpenDRIVE** (with the **Enrich with OpenStreetMap
+    (online)** checkbox next to it — optional, off by default, see *Online
+    map enrichment* below for what it does and doesn't affect); **OpenSCENARIO**
+    and **ADP scenario (.scn.yaml)** (for ADP, which doesn't read `.xosc` —
+    see *ADP YAML export* below, including the optional **Map key** field
+    above the two); and a **trace summary** as `.txt` or `.xml` — see *Trace
+    summary report* below. Every export writes into `output/` and never
+    triggers a browser download — see *Output directory* below.
+11. **Map (OSM)** (viewport controls, top-left of the canvas) overlays
     nearby OpenStreetMap roads on the visualizer for the currently loaded
     trace, once you check it — see *Map overlay in the visualizer* below.
 
@@ -202,10 +212,15 @@ shown or selected) and returns immediately; the GUI polls for progress
     (ADMA+Annotation)** (checked by default), **OpenDRIVE**, **OpenSCENARIO**,
     **ADP scenario (.scn.yaml)**, **Trace summary (.txt)**, **Trace summary
     (.xml)** — the same artifact types as the single-trace Export panel (see
-    *Using the GUI* above), just applied corpus-wide. ADP scenario's
-    `map.key` isn't configurable here — each trace gets its own trace_id
-    default, same as leaving the single-trace Map key field blank, since a
-    whole corpus can't sensibly share one map key anyway.
+    *Using the GUI* above), just applied corpus-wide. Next to OpenDRIVE, an
+    **Enrich with OpenStreetMap (online)** checkbox mirrors the single-trace
+    one (see *Online map enrichment* below) — off by default, only takes
+    effect when OpenDRIVE is checked, and a lookup failure for one trace
+    falls back to the offline result for that trace without affecting the
+    rest of the run. ADP scenario's `map.key` isn't configurable here — each
+    trace gets its own trace_id default, same as leaving the single-trace
+    Map key field blank, since a whole corpus can't sensibly share one map
+    key anyway.
   - **Also build catalog** — folds cataloging the *corrected* trace into the
     same pass (one parse instead of two), equivalent to the old "Fix and
     Build Catalog" button.
@@ -269,7 +284,10 @@ The `.txt` / `.xml` export (per-trace button, or written automatically by
 the batch action) is a standalone summary meant for a QA/review team,
 covering:
 
-- **Scene composition** — object count by type (car, truck, ...).
+- **Scene composition** — moving-object count by type (car, truck, ...).
+- **Static objects** — count by type of the annotation's static objects
+  (traffic signs, reflective markers, and similar roadside fixtures) —
+  same shape as scene composition, just for things that don't move.
 - **Ego braking events** — sustained deceleration above ~3 m/s² (moderate)
   or ~6 m/s² (hard/AEB-like), detected from the ADMA speed profile.
 - **Overtake events** — a vehicle crossing from behind the ego to ahead of

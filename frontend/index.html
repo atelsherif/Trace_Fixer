@@ -75,6 +75,9 @@
               <div class="scan-fix-export-row scan-fix-export-exports">
                 <label class="checkbox-field"><input id="scan-opt-export-fixed" type="checkbox" checked /> Fixed Trace (ADMA+Annotation)</label>
                 <label class="checkbox-field"><input id="scan-opt-export-opendrive" type="checkbox" /> OpenDRIVE</label>
+                <label class="checkbox-field" title="Look up each trace's road on OpenStreetMap before generating its OpenDRIVE file (road name, and a lane-count hint used only where the annotation itself has no trustworthy estimate). Requires internet access; falls back silently to the offline result per-trace on failure. Only applies when OpenDRIVE is checked.">
+                  <input id="scan-opt-enrich-osm" type="checkbox" /> Enrich with OpenStreetMap (online)
+                </label>
                 <label class="checkbox-field"><input id="scan-opt-export-openscenario" type="checkbox" /> OpenSCENARIO</label>
                 <label class="checkbox-field"><input id="scan-opt-export-adp" type="checkbox" /> ADP scenario (.scn.yaml)</label>
                 <label class="checkbox-field"><input id="scan-opt-export-report-txt" type="checkbox" /> Trace summary (.txt)</label>
@@ -109,6 +112,11 @@
       <div class="panel-block">
         <h2>Vehicles <span id="vehicle-count" class="badge">0</span></h2>
         <ul id="vehicle-list" class="issue-list vehicle-list"></ul>
+      </div>
+
+      <div class="panel-block">
+        <h2>Static Objects <span id="static-object-count" class="badge">0</span></h2>
+        <ul id="static-object-list" class="issue-list static-object-list"></ul>
       </div>
 
       <div class="panel-block">

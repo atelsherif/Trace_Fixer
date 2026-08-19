@@ -1,8 +1,8 @@
-"""Trace-level behavioral summary: scene composition (object counts by
-type), ego hard-braking events (AEB-like), and overtake events (a vehicle
-passing the ego, or the ego passing a vehicle). Used by export.report to
-produce a "what's in this trace" summary rather than only a list of data
-quality issues.
+"""Trace-level behavioral summary: scene composition (moving-object and
+static-object counts by type), ego hard-braking events (AEB-like), and
+overtake events (a vehicle passing the ego, or the ego passing a vehicle).
+Used by export.report to produce a "what's in this trace" summary rather
+than only a list of data quality issues.
 """
 from __future__ import annotations
 
@@ -102,6 +102,7 @@ class SharpTurnEvent:
 @dataclass
 class TraceSummary:
     object_counts: dict[str, int]
+    static_object_counts: dict[str, int]
     braking_events: list[BrakingEvent]
     overtake_events: list[OvertakeEvent]
     short_headway_events: list[ShortHeadwayEvent]
@@ -114,6 +115,13 @@ def count_objects_by_type(trace: Trace) -> dict[str, int]:
     counts: dict[str, int] = {}
     for track in trace.annotation.vehicles.values():
         counts[track.obj_type] = counts.get(track.obj_type, 0) + 1
+    return counts
+
+
+def count_static_objects_by_type(trace: Trace) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for static_obj in trace.annotation.static_objects.values():
+        counts[static_obj.obj_type] = counts.get(static_obj.obj_type, 0) + 1
     return counts
 
 
@@ -325,6 +333,7 @@ def detect_sharp_turn_events(trace: Trace) -> list[SharpTurnEvent]:
 def build_trace_summary(trace: Trace) -> TraceSummary:
     return TraceSummary(
         object_counts=count_objects_by_type(trace),
+        static_object_counts=count_static_objects_by_type(trace),
         braking_events=detect_braking_events(trace),
         overtake_events=detect_overtake_events(trace),
         short_headway_events=detect_short_headway_events(trace),

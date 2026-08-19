@@ -356,6 +356,36 @@ def test_batch_all_run_mode_only_writes_the_selected_export_types(client_with_co
         assert (output_dir / "reports" / name / f"{name}_summary.xml").exists()
 
 
+def test_batch_all_run_mode_threads_enrich_through_to_opendrive_only(client_with_corpus, monkeypatch):
+    """The GUI's batch-panel OSM checkbox sets `enrich`, which must only
+    take effect when OpenDRIVE is also being written -- confirm the
+    provider is actually invoked once per trace when both are set, and not
+    invoked at all when OpenDRIVE is unchecked even with enrich set."""
+    import trace_fixer.export.map_enrichment as map_enrichment
+
+    calls = []
+
+    def fake_fetch(self, bbox, timeout=map_enrichment.DEFAULT_TIMEOUT_S):
+        calls.append(1)
+        return map_enrichment.MapEnrichmentResult(provider="osm", bbox=bbox, ways=[])
+
+    monkeypatch.setattr(map_enrichment.OSMOverpassProvider, "fetch", fake_fetch)
+
+    client, names, _output_dir = client_with_corpus
+    r = client.post("/api/batch/all", json={"export_opendrive": False, "enrich": "osm"})
+    assert r.status_code == 200
+    _wait_for_batch_done(client)
+    assert calls == []
+
+    r = client.post("/api/batch/all", json={"export_opendrive": True, "enrich": "osm"})
+    assert r.status_code == 200
+    _wait_for_batch_done(client)
+    # >=1 rather than ==len(names): this fixture's traces are copies of the
+    # same sample data, so they share a disk cache key (see
+    # export.map_enrichment) and only the first genuinely hits the provider.
+    assert len(calls) >= 1
+
+
 def test_fix_issues_and_predict_trajectories_are_independently_skippable(client_with_corpus):
     """Exercised via the single-trace endpoint (same _fix_predict_and_write_output
     code path /api/batch/all's "run" mode uses) since it echoes fix_summary/
