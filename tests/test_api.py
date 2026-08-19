@@ -152,6 +152,36 @@ def test_individual_export_endpoints_write_to_output_and_report_the_path(client_
     assert "<TraceSummary" in report_path.read_text()
 
 
+def test_export_adp_yaml_writes_to_output_and_flags_the_placeholder_map_key(client_with_corpus):
+    import yaml
+
+    client, names, output_dir = client_with_corpus
+    trace_id = names[0]
+
+    r = client.get(f"/api/traces/{trace_id}/export/adp_yaml")
+    assert r.status_code == 200
+    out_path = output_dir / "scenarios" / trace_id / f"{trace_id}.scn.yaml"
+    assert out_path.exists()
+    data = r.json()
+    assert data["output_path"] == str(out_path)
+    assert data["map_key"] == trace_id
+    assert data["map_key_is_placeholder"] is True
+    doc = yaml.safe_load(out_path.read_text())
+    assert doc["map"]["key"] == trace_id
+    assert doc["agents"][0]["ego"] is not None
+
+
+def test_export_adp_yaml_with_explicit_map_key(client_with_corpus):
+    client, names, _output_dir = client_with_corpus
+    trace_id = names[0]
+
+    r = client.get(f"/api/traces/{trace_id}/export/adp_yaml", params={"map_key": "REGISTERED_MAP"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["map_key"] == "REGISTERED_MAP"
+    assert data["map_key_is_placeholder"] is False
+
+
 def test_list_traces_paginates_and_totals_the_filtered_set(client_with_corpus):
     client, names, _output_dir = client_with_corpus
     sorted_names = sorted(names, key=str.lower)

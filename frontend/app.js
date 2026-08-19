@@ -57,6 +57,9 @@ async function runExport(label, path) {
         msg += ` (${data.enrichment_requested} enrichment failed: ${data.enrichment_error || "unknown reason"}; used offline data)`;
       }
     }
+    if (data.map_key_is_placeholder) {
+      msg += ` (map.key defaulted to "${data.map_key}" -- confirm this matches ADP's registered map key, or set one above)`;
+    }
     setStatus(msg);
   } catch (err) {
     setStatus(`Export failed: ${err.message}`);
@@ -988,6 +991,11 @@ function wireControls() {
   el("export-scenario").addEventListener("click", () => {
     const enrich = el("export-enrich-osm").checked ? "?enrich=osm" : "";
     runExport("scenario", `/api/traces/${state.traceId}/export/scenario${enrich}`);
+  });
+  el("export-adp-yaml").addEventListener("click", () => {
+    const mapKey = el("adp-map-key").value.trim();
+    const params = mapKey ? `?map_key=${encodeURIComponent(mapKey)}` : "";
+    runExport("ADP scenario", `/api/traces/${state.traceId}/export/adp_yaml${params}`);
   });
   el("export-report-txt").addEventListener("click", () =>
     runExport("trace summary", `/api/traces/${state.traceId}/export/report?format=txt`)

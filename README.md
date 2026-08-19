@@ -101,12 +101,15 @@ the "do something about it" side — validate, predict, fix, and export.
 8. **Sync offset** nudges the annotation clock against the ADMA clock (see
    *Time alignment* below) — drag while watching the replay.
 9. **Export** the fixed ADMA CSV, fixed annotation XML, an
-   OpenDRIVE + OpenSCENARIO `.zip`, or a **trace summary** (`.txt` or
-   `.xml`) — see *Trace summary report* below. Every export writes into
-   `output/` and never triggers a browser download — see *Output directory*
-   below. The **Enrich with OpenStreetMap (online)** checkbox next to the
-   OpenSCENARIO/OpenDRIVE button is optional and off by default — see
-   *Online map enrichment* below for what it does and doesn't affect.
+   OpenDRIVE + OpenSCENARIO `.zip`, an **ADP scenario (.scn.yaml)** (for
+   ADP, which doesn't read `.xosc` — see *ADP YAML export* below, including
+   the optional **Map key** field above the button), or a **trace summary**
+   (`.txt` or `.xml`) — see *Trace summary report* below. Every export
+   writes into `output/` and never triggers a browser download — see
+   *Output directory* below. The **Enrich with OpenStreetMap (online)**
+   checkbox next to the OpenSCENARIO/OpenDRIVE button is optional and off
+   by default — see *Online map enrichment* below for what it does and
+   doesn't affect.
 10. **Map (OSM)** (viewport controls, top-left of the canvas) overlays
     nearby OpenStreetMap roads on the visualizer for the currently loaded
     trace, once you check it — see *Map overlay in the visualizer* below.
@@ -329,6 +332,10 @@ backend/trace_fixer/
                                today) behind a swappable provider interface
                                -- see "Online map enrichment" below
   export/openscenario.py      OpenSCENARIO FollowTrajectoryAction replay
+  export/adp_yaml.py          ADP (Applied Intuition Simian) .scn.yaml --
+                               alternative to OpenSCENARIO for ADP, which
+                               doesn't read .xosc -- see "ADP YAML export"
+                               below
   export/report.py            trace summary export (txt / xml): scene
                                composition, braking/overtake events, issues
   export/batch_output.py      resolves + writes every export into output/,
@@ -609,6 +616,59 @@ lanes line up against the real road, not a replacement for either.
   returned road geometry into the same local (x, y) frame as the rest of
   the scene JSON, so the frontend only ever draws plain canvas
   coordinates.
+
+## ADP YAML export (alternative to OpenSCENARIO)
+
+ADP (Applied Intuition's "Simian" platform) doesn't read `.xosc` files, so
+**ADP scenario (.scn.yaml)**, next to the OpenSCENARIO/OpenDRIVE button,
+exports the same fixed/predicted trace as ADP's own `.scn.yaml` scenario
+format instead — `GET /api/traces/{trace_id}/export/adp_yaml`, writing to
+`output/scenarios/<trace_id>/<trace_id>.scn.yaml`.
+
+There's no public schema for this format — ADP's own docs live behind a
+login this tool can't reach. `export/adp_yaml.py` was reverse-engineered
+instead from real `.scn.yaml` files, including two ADP's own
+log-extraction pipeline produced from real driving recordings (identifiable
+by `metadata.comments` mentioning an "Originating simulation run"). Being
+the closest analog to what this tool does — turning a real ADMA +
+annotation log into a scenario — that pipeline's own pattern is what the
+generator mirrors: ego and vehicle paths are resampled at a fixed ~15m arc
+length into `pose_b_spline` waypoints paired with `ramp_velocity` phases,
+vehicles that enter or leave the recording partway through get
+`hide`/`until_true` wrapping timed to their actual first/last observation,
+and everyone shares a generic `kinematic_bicycle` motion model, all matching
+the sample files' own structure rather than being invented from scratch.
+Coordinates are absolute UTM easting/northing: this tool's internal local
+frame (meters, anchored at the trace's first GPS sample) is added to one
+UTM point computed at that anchor, rather than re-projecting every point,
+since the two agree to within the UTM grid convergence angle over a single
+trace's length.
+
+Two things in the output are unavoidably best-effort guesses, not derived
+facts, and are worth checking before trusting a generated file:
+
+- **`map.key`** — ADP resolves this against its own map registry, which
+  this tool has no access to. Per how this project's OpenDRIVE export is
+  actually used: importing a trace's `.xodr` into ADP registers a map keyed
+  by the `.xodr` filename, so this defaults to the trace_id (matching
+  `<trace_id>.xodr`) — pass a **Map key** in the GUI (or `map_key` on the
+  endpoint) if the file was imported under a different name. Left at the
+  default, the exported YAML also gets a `metadata.comments` note saying so,
+  and the GUI's status line flags it the same way.
+- **Vehicle visual assets** (`model.spectral_model_spec.spectral_model`) —
+  ADP's asset catalog isn't accessible from here either.
+  `_guess_vehicle_model` maps each vehicle's annotated type and dimensions
+  onto a small set of generic assets actually seen in the sample files
+  (`GENERIC_YARIS` for cars, `CONFIGURABLE_SEMI_TRUCK` for anything
+  truck/trailer-like or longer than 9m — this one takes an exact
+  `truck_length` parameter, so it fits the annotated length precisely
+  regardless of the asset guess, `GENERIC_DAELIM_MOTORBIKE` for
+  motorcycles/bikes), falling back to a plain untextured box
+  (`model.static`, the same asset-agnostic shape OpenDRIVE static objects
+  already use, and always what's used for pedestrians and for annotation
+  static objects) whenever nothing in that small set is a plausible match.
+  A wrong guess only affects the simulation's visuals, never the
+  trajectory geometry — a one-line hand-edit in the output file.
 
 ## Known limitations / scope (v1)
 

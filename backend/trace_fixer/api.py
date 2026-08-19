@@ -12,8 +12,10 @@ from trace_fixer import catalog
 from trace_fixer.browse import list_subdirectories
 from trace_fixer.export.adma_writer import write_adma_csv
 from trace_fixer.export.annotation_writer import write_annotation_xml
+from trace_fixer.export.adp_yaml import generate_adp_scenario_yaml
 from trace_fixer.export.batch_output import (
     adma_output_path,
+    adp_yaml_output_path,
     annotation_output_path,
     report_output_path,
     scenario_output_paths,
@@ -473,6 +475,27 @@ def export_scenario(trace_id: str, enrich: str | None = None):
         "enrichment": enrichment.provider if enrichment else None,
         "enrichment_requested": enrich,
         "enrichment_error": enrichment_error,
+    }
+
+
+@app.get("/api/traces/{trace_id}/export/adp_yaml")
+def export_adp_yaml(trace_id: str, map_key: str | None = None, author_email: str | None = None):
+    """ADP (Applied Intuition Simian) `.scn.yaml` -- an alternative to
+    OpenSCENARIO for import into ADP, which doesn't read `.xosc`. See
+    export.adp_yaml's module docstring for what's derived from real sample
+    files vs. an unavoidable guess (most notably `map.key`, which defaults
+    to the trace_id here -- matching the .xodr filename ADP registers a map
+    key from on import -- and is echoed back in the response so the GUI can
+    surface it).
+    """
+    trace = _get_trace_or_404(trace_id)
+    text = generate_adp_scenario_yaml(trace, map_key=map_key, author_email=author_email)
+    out_path = adp_yaml_output_path(trace_id, OUTPUT_DIR)
+    out_path.write_text(text)
+    return {
+        "output_path": _relative_output_path(out_path),
+        "map_key": map_key or trace_id,
+        "map_key_is_placeholder": map_key is None,
     }
 
 

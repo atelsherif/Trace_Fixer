@@ -172,6 +172,13 @@
           <input id="export-enrich-osm" type="checkbox" /> Enrich with OpenStreetMap (online)
         </label>
         <div class="button-row">
+          <button id="export-adp-yaml" title="Alternative to OpenSCENARIO for ADP, which doesn't read .xosc. See README's 'ADP YAML export' section for what's a real conversion vs. a best-effort guess.">ADP scenario (.scn.yaml)</button>
+        </div>
+        <label class="text-field" title="ADP's own map registry key for this trace. Defaults to the trace_id, matching the OpenDRIVE export's <trace_id>.xodr filename -- override if you imported that file under a different name.">
+          Map key
+          <input id="adp-map-key" type="text" placeholder="(defaults to trace_id)" />
+        </label>
+        <div class="button-row">
           <button id="export-report-txt">Trace summary (.txt)</button>
           <button id="export-report-xml">Trace summary (.xml)</button>
         </div>

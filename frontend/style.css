@@ -631,6 +631,20 @@ select, input[type="text"] {
   white-space: nowrap;
 }
 
+.text-field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin: 4px 0;
+}
+
+.text-field input[type="text"] {
+  flex: 1;
+  min-width: 0;
+}
+
 .sync-field {
   margin-top: 10px;
 }
