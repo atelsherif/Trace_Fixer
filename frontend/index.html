@@ -64,13 +64,28 @@
               <button id="scan-batch-catalog" title="Analyze every matched trace (phenomena + issues) into the trace catalog, without writing fixed files to output/">
                 Build Catalog
               </button>
-              <button id="scan-batch-fix" title="Fix + predict every matched trace and write results to output/">
-                Fix Traces
+            </div>
+
+            <div class="scan-fix-export">
+              <h3>Fix and Export</h3>
+              <div class="scan-fix-export-row">
+                <label class="checkbox-field"><input id="scan-opt-fix" type="checkbox" checked /> Fix Issues</label>
+                <label class="checkbox-field"><input id="scan-opt-predict" type="checkbox" checked /> Predict trajectories</label>
+              </div>
+              <div class="scan-fix-export-row scan-fix-export-exports">
+                <label class="checkbox-field"><input id="scan-opt-export-fixed" type="checkbox" checked /> Fixed Trace (ADMA+Annotation)</label>
+                <label class="checkbox-field"><input id="scan-opt-export-opendrive" type="checkbox" /> OpenDRIVE</label>
+                <label class="checkbox-field"><input id="scan-opt-export-openscenario" type="checkbox" /> OpenSCENARIO</label>
+                <label class="checkbox-field"><input id="scan-opt-export-adp" type="checkbox" /> ADP scenario (.scn.yaml)</label>
+                <label class="checkbox-field"><input id="scan-opt-export-report-txt" type="checkbox" /> Trace summary (.txt)</label>
+                <label class="checkbox-field"><input id="scan-opt-export-report-xml" type="checkbox" /> Trace summary (.xml)</label>
+              </div>
+              <label class="checkbox-field"><input id="scan-opt-also-catalog" type="checkbox" /> Also build catalog</label>
+              <button id="scan-batch-run" class="primary" title="Run the checked fix/predict steps and write the checked export types for every matched trace">
+                Run
               </button>
             </div>
-            <button id="scan-batch-fix-catalog" title="Fix + predict every matched trace, and catalog the corrected result, in one pass">
-              Fix and Build Catalog
-            </button>
+
             <p id="scan-batch-all-status" class="scan-status"></p>
           </div>
         </div>
@@ -162,16 +177,16 @@
       <div class="panel-block">
         <h2>Export</h2>
         <div class="button-row">
-          <button id="export-adma">ADMA CSV</button>
-          <button id="export-annotation">Annotation XML</button>
+          <button id="export-fixed-trace" title="Writes both the corrected ADMA CSV and annotation XML into their respective output/ directories in one action.">Fixed Trace (ADMA+Annotation)</button>
         </div>
         <div class="button-row">
-          <button id="export-scenario">OpenSCENARIO/OpenDRIVE (.zip)</button>
+          <button id="export-opendrive">OpenDRIVE</button>
         </div>
         <label class="checkbox-field" title="Look up the trace's road on OpenStreetMap first (road name, and a lane-count hint used only where the annotation itself has no trustworthy estimate). Requires internet access; falls back silently to the offline result on failure.">
           <input id="export-enrich-osm" type="checkbox" /> Enrich with OpenStreetMap (online)
         </label>
         <div class="button-row">
+          <button id="export-openscenario">OpenSCENARIO</button>
           <button id="export-adp-yaml" title="Alternative to OpenSCENARIO for ADP, which doesn't read .xosc. See README's 'ADP YAML export' section for what's a real conversion vs. a best-effort guess.">ADP scenario (.scn.yaml)</button>
         </div>
         <label class="text-field" title="ADP's own map registry key for this trace. Defaults to the trace_id, matching the OpenDRIVE export's <trace_id>.xodr filename -- override if you imported that file under a different name.">

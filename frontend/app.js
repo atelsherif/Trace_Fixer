@@ -49,7 +49,7 @@ async function runExport(label, path) {
   setStatus(`Exporting ${label}…`);
   try {
     const data = await apiGet(path);
-    let msg = `Saved ${label} to ${data.output_path}`;
+    let msg = data.files ? `Saved ${label} to ${data.files.join(", ")}` : `Saved ${label} to ${data.output_path}`;
     if (data.enrichment_requested) {
       if (data.enrichment) {
         msg += ` (enriched with ${data.enrichment})`;
@@ -801,8 +801,7 @@ function wireControls() {
   el("dir-browser-cancel").addEventListener("click", () => el("dir-browser").classList.add("hidden"));
 
   el("scan-batch-catalog").addEventListener("click", () => runBatchAll("catalog"));
-  el("scan-batch-fix").addEventListener("click", () => runBatchAll("fix"));
-  el("scan-batch-fix-catalog").addEventListener("click", () => runBatchAll("fix_catalog"));
+  el("scan-batch-run").addEventListener("click", () => runBatchAll("run"));
 
   // -- catalog --
   el("catalog-btn").addEventListener("click", openCatalog);
@@ -984,14 +983,16 @@ function wireControls() {
     el("sync-offset-value").textContent = e.target.value;
   });
 
-  el("export-adma").addEventListener("click", () => runExport("adma", `/api/traces/${state.traceId}/export/adma`));
-  el("export-annotation").addEventListener("click", () =>
-    runExport("annotation", `/api/traces/${state.traceId}/export/annotation`)
+  el("export-fixed-trace").addEventListener("click", () =>
+    runExport("fixed trace", `/api/traces/${state.traceId}/export/fixed_trace`)
   );
-  el("export-scenario").addEventListener("click", () => {
+  el("export-opendrive").addEventListener("click", () => {
     const enrich = el("export-enrich-osm").checked ? "?enrich=osm" : "";
-    runExport("scenario", `/api/traces/${state.traceId}/export/scenario${enrich}`);
+    runExport("OpenDRIVE", `/api/traces/${state.traceId}/export/opendrive${enrich}`);
   });
+  el("export-openscenario").addEventListener("click", () =>
+    runExport("OpenSCENARIO", `/api/traces/${state.traceId}/export/openscenario`)
+  );
   el("export-adp-yaml").addEventListener("click", () => {
     const mapKey = el("adp-map-key").value.trim();
     const params = mapKey ? `?map_key=${encodeURIComponent(mapKey)}` : "";
@@ -1085,29 +1086,63 @@ async function loadDirBrowser(path) {
   }
 }
 
-// ---------- Batch ALL matched traces: catalog / fix / fix+catalog ----------
+// ---------- Batch ALL matched traces: catalog / configurable fix+export run ----------
 
-const BATCH_ALL_BUTTON_IDS = ["scan-batch-catalog", "scan-batch-fix", "scan-batch-fix-catalog"];
-const BATCH_ALL_DONE_SUFFIX = {
-  catalog: "Catalog updated.",
-  fix: "Corrected files written to output/.",
-  fix_catalog: "Corrected files written to output/ and catalog updated.",
-};
+const BATCH_ALL_BUTTON_IDS = ["scan-batch-catalog", "scan-batch-run"];
 
 let batchAllPolling = null;
+let lastBatchRunOptions = null; // used to describe what a "run" actually did once it finishes
 
 function setBatchAllButtonsDisabled(disabled) {
   for (const id of BATCH_ALL_BUTTON_IDS) el(id).disabled = disabled;
 }
 
+function collectBatchRunOptions() {
+  return {
+    fix_issues: el("scan-opt-fix").checked,
+    predict_trajectories: el("scan-opt-predict").checked,
+    export_fixed_trace: el("scan-opt-export-fixed").checked,
+    export_opendrive: el("scan-opt-export-opendrive").checked,
+    export_openscenario: el("scan-opt-export-openscenario").checked,
+    export_adp_yaml: el("scan-opt-export-adp").checked,
+    export_report_txt: el("scan-opt-export-report-txt").checked,
+    export_report_xml: el("scan-opt-export-report-xml").checked,
+    also_build_catalog: el("scan-opt-also-catalog").checked,
+  };
+}
+
+function batchRunDoneMessage(opts) {
+  const did = [];
+  if (opts.fix_issues) did.push("fixed issues");
+  if (opts.predict_trajectories) did.push("predicted trajectories");
+  const wrote = [];
+  if (opts.export_fixed_trace) wrote.push("Fixed Trace");
+  if (opts.export_opendrive) wrote.push("OpenDRIVE");
+  if (opts.export_openscenario) wrote.push("OpenSCENARIO");
+  if (opts.export_adp_yaml) wrote.push("ADP scenario");
+  if (opts.export_report_txt) wrote.push("summary .txt");
+  if (opts.export_report_xml) wrote.push("summary .xml");
+  const parts = [];
+  if (did.length) parts.push(did.join(" + "));
+  if (wrote.length) parts.push(`wrote ${wrote.join(", ")}`);
+  if (opts.also_build_catalog) parts.push("catalog updated");
+  return parts.length ? `${parts.join("; ")}.` : "Nothing selected -- no changes made.";
+}
+
 async function runBatchAll(mode) {
   try {
-    const r = await fetch(`/api/batch/all?mode=${encodeURIComponent(mode)}`, { method: "POST" });
+    const opts = mode === "run" ? collectBatchRunOptions() : null;
+    const r = await fetch(`/api/batch/all?mode=${encodeURIComponent(mode)}`, {
+      method: "POST",
+      headers: opts ? { "Content-Type": "application/json" } : undefined,
+      body: opts ? JSON.stringify(opts) : undefined,
+    });
     const data = await r.json();
     if (!r.ok) {
       el("scan-batch-all-status").textContent = `Could not start: ${data.detail || r.status}`;
       return;
     }
+    lastBatchRunOptions = opts;
     setBatchAllButtonsDisabled(true);
     el("scan-batch-all-status").textContent = `Starting: 0/${data.total}…`;
     pollBatchAllStatus();
@@ -1130,7 +1165,8 @@ function pollBatchAllStatus() {
     }
     clearInterval(batchAllPolling);
     setBatchAllButtonsDisabled(false);
-    const doneSuffix = BATCH_ALL_DONE_SUFFIX[data.mode] || "";
+    const doneSuffix =
+      data.mode === "catalog" ? "Catalog updated." : lastBatchRunOptions ? batchRunDoneMessage(lastBatchRunOptions) : "";
     el("scan-batch-all-status").textContent =
       `Done: ${data.done}/${data.total} processed` +
       (data.failed.length ? `, ${data.failed.length} failed: ${data.failed.map((f) => f.trace_id).join(", ")}` : "") +

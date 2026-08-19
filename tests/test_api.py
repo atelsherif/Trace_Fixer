@@ -100,7 +100,7 @@ def test_batch_fix_predict_runs_full_pipeline(client_with_corpus):
     annotation_out = Path(out["annotation_path"])
     xodr_out = Path(out["xodr_path"])
     xosc_out = Path(out["xosc_path"])
-    report_out = Path(out["report_path"])
+    report_out = Path(out["report_txt_path"])
     assert adma_out == output_dir / "adma" / "ADMA" / names[0] / "adma.csv"
     assert annotation_out.parent == output_dir / "annotations" / "Annotations"
     assert xodr_out == output_dir / "scenarios" / names[0] / f"{names[0]}.xodr"
@@ -134,15 +134,24 @@ def test_individual_export_endpoints_write_to_output_and_report_the_path(client_
     assert any((output_dir / "annotations" / "Annotations").glob(f"{trace_id}*"))
     assert Path(r.json()["output_path"]).exists()
 
-    r = client.get(f"/api/traces/{trace_id}/export/scenario")
+    r = client.get(f"/api/traces/{trace_id}/export/fixed_trace")
+    assert r.status_code == 200
+    files = r.json()["files"]
+    assert str(adma_path) in files
+    assert any((output_dir / "annotations" / "Annotations").glob(f"{trace_id}*"))
+    assert all(Path(f).exists() for f in files)
+
+    r = client.get(f"/api/traces/{trace_id}/export/opendrive")
     assert r.status_code == 200
     xodr_path = output_dir / "scenarios" / trace_id / f"{trace_id}.xodr"
-    xosc_path = output_dir / "scenarios" / trace_id / f"{trace_id}.xosc"
     assert xodr_path.exists()
+    assert r.json()["output_path"] == str(xodr_path)
+
+    r = client.get(f"/api/traces/{trace_id}/export/openscenario")
+    assert r.status_code == 200
+    xosc_path = output_dir / "scenarios" / trace_id / f"{trace_id}.xosc"
     assert xosc_path.exists()
-    data = r.json()
-    assert data["output_path"] == str(xodr_path.parent)
-    assert set(data["files"]) == {str(xodr_path), str(xosc_path)}
+    assert r.json()["output_path"] == str(xosc_path)
 
     r = client.get(f"/api/traces/{trace_id}/export/report", params={"format": "xml"})
     assert r.status_code == 200
@@ -250,7 +259,7 @@ def test_batch_all_processes_every_registered_trace(client_with_corpus):
     r = client.post("/api/batch/all")
     assert r.status_code == 200
     assert r.json()["total"] == 3
-    assert r.json()["mode"] == "fix"
+    assert r.json()["mode"] == "run"
 
     status = _wait_for_batch_done(client)
     assert status["running"] is False
@@ -304,7 +313,7 @@ def test_batch_all_catalog_mode_populates_catalog_without_writing_output(client_
 def test_batch_all_fix_catalog_mode_does_both(client_with_corpus):
     client, names, output_dir = client_with_corpus
 
-    r = client.post("/api/batch/all", params={"mode": "fix_catalog"})
+    r = client.post("/api/batch/all", params={"mode": "run"}, json={"also_build_catalog": True})
     assert r.status_code == 200
     status = _wait_for_batch_done(client)
     assert status["done"] == 3
@@ -318,6 +327,49 @@ def test_batch_all_fix_catalog_mode_does_both(client_with_corpus):
     assert data["total"] == 3
     for row in data["rows"]:
         assert row["processed_at"] is not None
+
+
+def test_batch_all_run_mode_only_writes_the_selected_export_types(client_with_corpus):
+    """The GUI's Fix and Export checkboxes map 1:1 onto FixExportOptions --
+    confirm unchecked export types genuinely don't get written, not just
+    that checked ones do."""
+    client, names, output_dir = client_with_corpus
+
+    r = client.post("/api/batch/all", json={
+        "export_fixed_trace": False,
+        "export_opendrive": False,
+        "export_openscenario": False,
+        "export_adp_yaml": True,
+        "export_report_txt": False,
+        "export_report_xml": True,
+    })
+    assert r.status_code == 200
+    _wait_for_batch_done(client)
+
+    assert not (output_dir / "adma").exists()
+    assert not (output_dir / "annotations").exists()
+    for name in names:
+        assert not (output_dir / "scenarios" / name / f"{name}.xodr").exists()
+        assert not (output_dir / "scenarios" / name / f"{name}.xosc").exists()
+        assert (output_dir / "scenarios" / name / f"{name}.scn.yaml").exists()
+        assert not (output_dir / "reports" / name / f"{name}_summary.txt").exists()
+        assert (output_dir / "reports" / name / f"{name}_summary.xml").exists()
+
+
+def test_fix_issues_and_predict_trajectories_are_independently_skippable(client_with_corpus):
+    """Exercised via the single-trace endpoint (same _fix_predict_and_write_output
+    code path /api/batch/all's "run" mode uses) since it echoes fix_summary/
+    predicted back, making the skip actually observable."""
+    client, names, _output_dir = client_with_corpus
+    trace_id = names[0]
+
+    r = client.post(f"/api/traces/{trace_id}/batch_fix_predict", json={
+        "fix_issues": False, "predict_trajectories": False, "export_opendrive": False, "export_openscenario": False,
+    })
+    assert r.status_code == 200
+    data = r.json()
+    assert data["fix_summary"] == {}
+    assert data["predicted"] == {}
 
 
 def test_catalog_query_filters_and_tags_endpoint(client_with_corpus):
@@ -350,16 +402,16 @@ def test_scan_registers_identity_rows_in_catalog(client_with_corpus):
     assert all(row["processed_at"] is None for row in data["rows"])
 
 
-def test_export_scenario_without_enrich_param_is_unaffected(client_with_corpus):
+def test_export_opendrive_without_enrich_param_is_unaffected(client_with_corpus):
     client, names, _output_dir = client_with_corpus
-    r = client.get(f"/api/traces/{names[0]}/export/scenario")
+    r = client.get(f"/api/traces/{names[0]}/export/opendrive")
     assert r.status_code == 200
     data = r.json()
     assert data["enrichment"] is None
     assert data["enrichment_requested"] is None
 
 
-def test_export_scenario_enrich_falls_back_gracefully_on_failure(client_with_corpus, monkeypatch):
+def test_export_opendrive_enrich_falls_back_gracefully_on_failure(client_with_corpus, monkeypatch):
     """No real network call: simulate the provider failing, and confirm
     the export still succeeds (falls back to the offline result) rather
     than erroring -- the whole point of fetch_enrichment's contract."""
@@ -371,12 +423,22 @@ def test_export_scenario_enrich_falls_back_gracefully_on_failure(client_with_cor
     monkeypatch.setattr(map_enrichment.OSMOverpassProvider, "fetch", boom)
 
     client, names, _output_dir = client_with_corpus
-    r = client.get(f"/api/traces/{names[0]}/export/scenario", params={"enrich": "osm"})
+    r = client.get(f"/api/traces/{names[0]}/export/opendrive", params={"enrich": "osm"})
     assert r.status_code == 200
     data = r.json()
     assert data["enrichment"] is None
     assert data["enrichment_requested"] == "osm"
     assert "simulated network failure" in data["enrichment_error"]
+
+
+def test_export_openscenario_writes_xosc_referencing_canonical_xodr_filename(client_with_corpus):
+    client, names, output_dir = client_with_corpus
+    trace_id = names[0]
+    r = client.get(f"/api/traces/{trace_id}/export/openscenario")
+    assert r.status_code == 200
+    xosc_path = output_dir / "scenarios" / trace_id / f"{trace_id}.xosc"
+    assert xosc_path.exists()
+    assert f"{trace_id}.xodr" in xosc_path.read_text()
 
 
 def test_map_overlay_converts_ways_into_the_scene_local_frame(client_with_corpus, monkeypatch):

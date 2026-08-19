@@ -100,16 +100,16 @@ the "do something about it" side — validate, predict, fix, and export.
    to see what's left.
 8. **Sync offset** nudges the annotation clock against the ADMA clock (see
    *Time alignment* below) — drag while watching the replay.
-9. **Export** the fixed ADMA CSV, fixed annotation XML, an
-   OpenDRIVE + OpenSCENARIO `.zip`, an **ADP scenario (.scn.yaml)** (for
-   ADP, which doesn't read `.xosc` — see *ADP YAML export* below, including
-   the optional **Map key** field above the button), or a **trace summary**
-   (`.txt` or `.xml`) — see *Trace summary report* below. Every export
-   writes into `output/` and never triggers a browser download — see
-   *Output directory* below. The **Enrich with OpenStreetMap (online)**
-   checkbox next to the OpenSCENARIO/OpenDRIVE button is optional and off
-   by default — see *Online map enrichment* below for what it does and
-   doesn't affect.
+9. **Export**, one artifact type per button: **Fixed Trace
+   (ADMA+Annotation)** writes both the corrected ADMA CSV and annotation XML
+   in one action; **OpenDRIVE** (with the **Enrich with OpenStreetMap
+   (online)** checkbox next to it — optional, off by default, see *Online
+   map enrichment* below for what it does and doesn't affect); **OpenSCENARIO**
+   and **ADP scenario (.scn.yaml)** (for ADP, which doesn't read `.xosc` —
+   see *ADP YAML export* below, including the optional **Map key** field
+   above the two); and a **trace summary** as `.txt` or `.xml` — see *Trace
+   summary report* below. Every export writes into `output/` and never
+   triggers a browser download — see *Output directory* below.
 10. **Map (OSM)** (viewport controls, top-left of the canvas) overlays
     nearby OpenStreetMap roads on the visualizer for the currently loaded
     trace, once you check it — see *Map overlay in the visualizer* below.
@@ -182,29 +182,44 @@ processed trace; see *Output directory* below.
 
 This works well up to however many traces you're willing to select by hand
 in the trace picker. For a whole corpus — including one larger than the
-picker's 200-per-page display — the Scan directory panel has three buttons
-that each run a background job over *every* trace currently registered with
-the server (not just what's shown or selected), and return immediately; the
-GUI polls for progress (`n/total processed`, current trace name, any
-failures) until it finishes:
+picker's 200-per-page display — the Scan directory panel runs a background
+job over *every* trace currently registered with the server (not just what's
+shown or selected) and returns immediately; the GUI polls for progress
+(`n/total processed`, current trace name, any failures) until it finishes:
 
-- **Fix Traces** — the same fix + predict + write-to-`output/` pipeline as
-  above, over the whole corpus.
 - **Build Catalog** — validates every trace and records it into the *trace
   catalog* (see below) — location, road/weather/light conditions,
   phenomenon tags, and issue counts — without touching `output/` at all.
-  Cheaper than Fix Traces when you just want to triage a corpus, not
+  Cheaper than a full run when you just want to triage a corpus, not
   produce corrected files yet.
-- **Fix and Build Catalog** — both, in one pass per trace (one parse
-  instead of two), so the catalog reflects the *corrected* trace.
+- **Fix and Export** — a configurable run over the whole corpus:
+  - **Fix Issues** / **Predict trajectories** (both on by default) — which
+    steps of validate → fix → predict outside FOV → re-validate to actually
+    run. Turning both off still validates before and after (so the "before/
+    after" counts stay meaningful) without changing anything.
+  - **Export types** — which artifacts to write to `output/` for each
+    processed trace, independently checkable: **Fixed Trace
+    (ADMA+Annotation)** (checked by default), **OpenDRIVE**, **OpenSCENARIO**,
+    **ADP scenario (.scn.yaml)**, **Trace summary (.txt)**, **Trace summary
+    (.xml)** — the same artifact types as the single-trace Export panel (see
+    *Using the GUI* above), just applied corpus-wide. ADP scenario's
+    `map.key` isn't configurable here — each trace gets its own trace_id
+    default, same as leaving the single-trace Map key field blank, since a
+    whole corpus can't sensibly share one map key anyway.
+  - **Also build catalog** — folds cataloging the *corrected* trace into the
+    same pass (one parse instead of two), equivalent to the old "Fix and
+    Build Catalog" button.
+  - The status line afterward summarizes what actually ran (e.g. "fixed
+    issues; wrote Fixed Trace, ADP scenario"), reflecting the checkboxes as
+    they were at the moment you clicked **Run**.
 
-They're plain buttons rather than a separate command-line script so the
-whole workflow — scan, inspect a few, catalog or process everything — stays
-inside one tool. A large corpus (thousands of traces) is processed one at a
-time, and each trace is dropped from the server's memory cache right after
-it's handled, so memory stays bounded regardless of corpus size. Only one
-such run can be in flight at a time; starting another while one is running
-is rejected until it finishes.
+It's a plain panel rather than a separate command-line script so the whole
+workflow — scan, inspect a few, catalog or process everything — stays inside
+one tool. A large corpus (thousands of traces) is processed one at a time,
+and each trace is dropped from the server's memory cache right after it's
+handled, so memory stays bounded regardless of corpus size. Only one such
+run can be in flight at a time; starting another while one is running is
+rejected until it finishes.
 
 ### Trace catalog
 
@@ -218,8 +233,9 @@ small SQLite database at `output/catalog.sqlite`, populated three ways:
   nothing is parsed.
 - Opening a single trace in the GUI, or including it in a batch, doesn't by
   itself update the catalog.
-- **Build Catalog** / **Fix and Build Catalog** (see above) is what fills in
-  the rest: location (the trace's first GPS fix), duration, vehicle count,
+- **Build Catalog**, or **Fix and Export** with **Also build catalog**
+  checked (see above), is what fills in the rest: location (the trace's
+  first GPS fix), duration, vehicle count,
   road type / weather / light conditions (read from the annotation file's
   per-frame metadata, when present), a set of **phenomenon** tags, and
   **issue** counts by category and severity (the same categories the issue
@@ -555,10 +571,10 @@ differently:
 
 Everything above works entirely offline, using only the trace's own data —
 that's still the default. Checking **Enrich with OpenStreetMap (online)**
-next to the OpenSCENARIO/OpenDRIVE export button (or passing `?enrich=osm`
-to the export endpoint directly) additionally looks up the trace's road on
-[OpenStreetMap](https://www.openstreetmap.org) via the public Overpass API
-before generating the file:
+next to the OpenDRIVE export button (or passing `?enrich=osm` to the
+`/export/opendrive` endpoint directly) additionally looks up the trace's
+road on [OpenStreetMap](https://www.openstreetmap.org) via the public
+Overpass API before generating the file:
 
 - The matched way's `name`/`ref` tag becomes the road's name in the
   generated `.xodr`, instead of the generic default.
@@ -620,9 +636,9 @@ lanes line up against the real road, not a replacement for either.
 ## ADP YAML export (alternative to OpenSCENARIO)
 
 ADP (Applied Intuition's "Simian" platform) doesn't read `.xosc` files, so
-**ADP scenario (.scn.yaml)**, next to the OpenSCENARIO/OpenDRIVE button,
-exports the same fixed/predicted trace as ADP's own `.scn.yaml` scenario
-format instead — `GET /api/traces/{trace_id}/export/adp_yaml`, writing to
+**ADP scenario (.scn.yaml)**, next to the OpenSCENARIO button, exports the
+same fixed/predicted trace as ADP's own `.scn.yaml` scenario format instead
+— `GET /api/traces/{trace_id}/export/adp_yaml`, writing to
 `output/scenarios/<trace_id>/<trace_id>.scn.yaml`.
 
 There's no public schema for this format — ADP's own docs live behind a

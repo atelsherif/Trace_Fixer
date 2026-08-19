@@ -203,8 +203,27 @@ class PredictRequest(BaseModel):
     forward: bool = True
 
 
-class BatchFixPredictRequest(PredictRequest):
+class FixExportOptions(PredictRequest):
+    """What to do to a trace and what to write to output/ for it -- shared
+    by the single-trace "batch_fix_predict" endpoint (defaults reproduce
+    its original always-do-everything behavior) and the Scan Directory
+    panel's whole-corpus /api/batch/all "run" mode (GUI checkboxes set
+    every field explicitly).
+    """
+
     include_predictions_in_output: bool = True
+    fix_issues: bool = True
+    predict_trajectories: bool = True
+    export_fixed_trace: bool = True
+    export_opendrive: bool = True
+    export_openscenario: bool = True
+    export_adp_yaml: bool = False
+    export_report_txt: bool = True
+    export_report_xml: bool = False
+    also_build_catalog: bool = False
+    enrich: str | None = None
+    map_key: str | None = None
+    author_email: str | None = None
 
 
 @app.post("/api/traces/{trace_id}/predict")
@@ -225,36 +244,56 @@ def predict_clear(trace_id: str):
     return {"scene": build_scene_json(trace)}
 
 
-def _fix_predict_and_write_output(trace_id: str, req: BatchFixPredictRequest) -> dict:
-    """validate -> fix -> predict -> re-validate for one trace, then writes
-    every artifact (corrected ADMA + annotation, OpenDRIVE + OpenSCENARIO,
-    and a trace summary report) into output/, mirroring the input corpus
-    layout for ADMA/annotation -- see export.batch_output. Shared by the
-    single-trace endpoint below and the "fix + predict ALL" background job.
+def _fix_predict_and_write_output(trace_id: str, opts: FixExportOptions) -> dict:
+    """validate -> (optionally) fix -> (optionally) predict -> re-validate
+    for one trace, then writes whichever artifacts `opts` asks for into
+    output/, mirroring the input corpus layout for ADMA/annotation -- see
+    export.batch_output. Shared by the single-trace endpoint below and the
+    Scan Directory panel's whole-corpus "run" background job.
     """
     trace = store.get(trace_id)
     before = run_validation(trace)
-    fix_summary = apply_fixes(trace)
-    added = predict_all(
-        trace, horizon_s=req.horizon_s, step_s=req.step_s, backward=req.backward, forward=req.forward
+    fix_summary = apply_fixes(trace) if opts.fix_issues else {}
+    added = (
+        predict_all(trace, horizon_s=opts.horizon_s, step_s=opts.step_s, backward=opts.backward, forward=opts.forward)
+        if opts.predict_trajectories
+        else {}
     )
     after = run_validation(trace)
 
-    output_paths = write_batch_output(
-        trace,
-        store.original_annotation_path(trace_id),
-        OUTPUT_DIR,
-        include_predictions=req.include_predictions_in_output,
-    )
-    xodr_path, xosc_path = scenario_output_paths(trace_id, OUTPUT_DIR)
-    xodr_path.write_text(generate_opendrive(trace))
-    xosc_path.write_text(generate_openscenario(trace, xodr_path.name))
-    output_paths["xodr_path"] = str(xodr_path)
-    output_paths["xosc_path"] = str(xosc_path)
+    output_paths: dict[str, str] = {}
+    if opts.export_fixed_trace:
+        output_paths.update(write_batch_output(
+            trace, store.original_annotation_path(trace_id), OUTPUT_DIR,
+            include_predictions=opts.include_predictions_in_output,
+        ))
 
-    report_path = report_output_path(trace_id, OUTPUT_DIR, "txt")
-    report_path.write_text(generate_txt_report(trace))
-    output_paths["report_path"] = str(report_path)
+    if opts.export_opendrive or opts.export_openscenario:
+        xodr_path, xosc_path = scenario_output_paths(trace_id, OUTPUT_DIR)
+        if opts.export_opendrive:
+            enrichment = None
+            if opts.enrich:
+                enrichment, _err = fetch_enrichment(trace, opts.enrich, cache_dir=OUTPUT_DIR / "map_cache")
+            xodr_path.write_text(generate_opendrive(trace, enrichment=enrichment))
+            output_paths["xodr_path"] = str(xodr_path)
+        if opts.export_openscenario:
+            xosc_path.write_text(generate_openscenario(trace, xodr_path.name))
+            output_paths["xosc_path"] = str(xosc_path)
+
+    if opts.export_adp_yaml:
+        adp_path = adp_yaml_output_path(trace_id, OUTPUT_DIR)
+        adp_path.write_text(generate_adp_scenario_yaml(trace, map_key=opts.map_key, author_email=opts.author_email))
+        output_paths["adp_yaml_path"] = str(adp_path)
+
+    if opts.export_report_txt:
+        report_path = report_output_path(trace_id, OUTPUT_DIR, "txt")
+        report_path.write_text(generate_txt_report(trace))
+        output_paths["report_txt_path"] = str(report_path)
+
+    if opts.export_report_xml:
+        report_path = report_output_path(trace_id, OUTPUT_DIR, "xml")
+        report_path.write_text(generate_xml_report(trace))
+        output_paths["report_xml_path"] = str(report_path)
 
     return {
         "trace_id": trace_id,
@@ -267,10 +306,11 @@ def _fix_predict_and_write_output(trace_id: str, req: BatchFixPredictRequest) ->
 
 
 @app.post("/api/traces/{trace_id}/batch_fix_predict")
-def batch_fix_predict(trace_id: str, req: BatchFixPredictRequest = BatchFixPredictRequest()):
+def batch_fix_predict(trace_id: str, req: FixExportOptions = FixExportOptions()):
     """No scene payload in the response -- meant to be called in a loop over
     many trace_ids (see the GUI's multi-select "batch" action) without
-    paying for a full scene JSON build on every one.
+    paying for a full scene JSON build on every one. Defaults reproduce the
+    original fix+predict+export-everything-but-ADP-and-xml pipeline.
     """
     try:
         return _fix_predict_and_write_output(trace_id, req)
@@ -278,7 +318,7 @@ def batch_fix_predict(trace_id: str, req: BatchFixPredictRequest = BatchFixPredi
         raise HTTPException(status_code=404, detail=f"Unknown trace_id '{trace_id}'")
 
 
-BATCH_ALL_MODES = ("catalog", "fix", "fix_catalog")
+BATCH_ALL_MODES = ("catalog", "run")
 
 _batch_all_lock = threading.Lock()
 _batch_all_state: dict = {
@@ -299,25 +339,23 @@ def _catalog_trace(trace_id: str, trace) -> None:
         conn.close()
 
 
-def _process_one_for_batch_all(trace_id: str, mode: str, req: BatchFixPredictRequest) -> None:
+def _process_one_for_batch_all(trace_id: str, mode: str, opts: FixExportOptions) -> None:
     if mode == "catalog":
         trace = store.get(trace_id)
         run_validation(trace)
         _catalog_trace(trace_id, trace)
-    elif mode == "fix":
-        _fix_predict_and_write_output(trace_id, req)
-    else:  # "fix_catalog"
-        _fix_predict_and_write_output(trace_id, req)
-        _catalog_trace(trace_id, store.get(trace_id))  # already fixed + re-validated, still cached
+    else:  # "run"
+        _fix_predict_and_write_output(trace_id, opts)
+        if opts.also_build_catalog:
+            _catalog_trace(trace_id, store.get(trace_id))  # already fixed + re-validated, still cached
 
 
-def _run_batch_all(trace_ids: list[str], mode: str) -> None:
-    req = BatchFixPredictRequest()
+def _run_batch_all(trace_ids: list[str], mode: str, opts: FixExportOptions) -> None:
     for trace_id in trace_ids:
         with _batch_all_lock:
             _batch_all_state["current"] = trace_id
         try:
-            _process_one_for_batch_all(trace_id, mode, req)
+            _process_one_for_batch_all(trace_id, mode, opts)
         except Exception as exc:  # noqa: BLE001 -- one bad trace must not stop the run
             with _batch_all_lock:
                 _batch_all_state["failed"].append({"trace_id": trace_id, "error": str(exc)})
@@ -331,19 +369,20 @@ def _run_batch_all(trace_ids: list[str], mode: str) -> None:
 
 
 @app.post("/api/batch/all")
-def start_batch_all(mode: str = "fix"):
-    """Runs one of three pipelines over *every* registered trace (not just
-    the page currently shown in the trace picker) in a background thread,
-    and returns immediately -- poll /api/batch/all/status for progress.
-    Meant for corpora too large to comfortably multi-select in the GUI.
+def start_batch_all(mode: str = "run", opts: FixExportOptions = FixExportOptions()):
+    """Runs one of two pipelines over *every* registered trace (not just the
+    page currently shown in the trace picker) in a background thread, and
+    returns immediately -- poll /api/batch/all/status for progress. Meant
+    for corpora too large to comfortably multi-select in the GUI.
 
       - "catalog": validate only, then record location/metadata/phenomena/
-        issues into the trace catalog (see catalog.py). No output/ files.
-      - "fix": the existing fix + predict + write-to-output/ pipeline
-        (validate -> fix -> predict -> re-validate). Doesn't touch the
-        catalog.
-      - "fix_catalog": both, in one pass per trace (one parse instead of
-        two) -- catalogs the *corrected* trace.
+        issues into the trace catalog (see catalog.py). No output/ files;
+        `opts` is ignored.
+      - "run": validate -> whichever of fix/predict `opts` asks for ->
+        re-validate -> write whichever export artifacts `opts` asks for
+        (see FixExportOptions) -- optionally also cataloging the corrected
+        trace in the same pass via `opts.also_build_catalog`, one parse
+        instead of two.
     """
     if mode not in BATCH_ALL_MODES:
         raise HTTPException(status_code=400, detail=f"mode must be one of {BATCH_ALL_MODES}")
@@ -352,7 +391,7 @@ def start_batch_all(mode: str = "fix"):
             raise HTTPException(status_code=409, detail="A batch run is already in progress")
         trace_ids = store.list_ids()
         _batch_all_state.update(running=True, mode=mode, total=len(trace_ids), done=0, current=None, failed=[])
-    threading.Thread(target=_run_batch_all, args=(trace_ids, mode), daemon=True).start()
+    threading.Thread(target=_run_batch_all, args=(trace_ids, mode, opts), daemon=True).start()
     return {"started": True, "mode": mode, "total": len(trace_ids)}
 
 
@@ -452,8 +491,22 @@ def export_annotation(trace_id: str, include_predictions: bool = True):
     return {"output_path": _relative_output_path(out_path)}
 
 
-@app.get("/api/traces/{trace_id}/export/scenario")
-def export_scenario(trace_id: str, enrich: str | None = None):
+@app.get("/api/traces/{trace_id}/export/fixed_trace")
+def export_fixed_trace(trace_id: str, include_predictions: bool = True):
+    """Writes both the corrected ADMA CSV and annotation XML in one call --
+    the GUI's single "Fixed Trace (ADMA+Annotation)" button. Equivalent to
+    calling /export/adma and /export/annotation separately; those stay
+    available individually for API callers that only want one file.
+    """
+    trace = _get_trace_or_404(trace_id)
+    paths = write_batch_output(
+        trace, store.original_annotation_path(trace_id), OUTPUT_DIR, include_predictions=include_predictions
+    )
+    return {"files": [_relative_output_path(Path(paths["adma_path"])), _relative_output_path(Path(paths["annotation_path"]))]}
+
+
+@app.get("/api/traces/{trace_id}/export/opendrive")
+def export_opendrive_only(trace_id: str, enrich: str | None = None):
     """`enrich` is opt-in and off by default (None): pass e.g. "osm" to look
     up the trace's road on OpenStreetMap first (road name, and a lane-count
     hint used only where the annotation itself gives no trustworthy
@@ -466,16 +519,26 @@ def export_scenario(trace_id: str, enrich: str | None = None):
     if enrich:
         enrichment, enrichment_error = fetch_enrichment(trace, enrich, cache_dir=OUTPUT_DIR / "map_cache")
 
-    xodr_path, xosc_path = scenario_output_paths(trace_id, OUTPUT_DIR)
+    xodr_path, _xosc_path = scenario_output_paths(trace_id, OUTPUT_DIR)
     xodr_path.write_text(generate_opendrive(trace, enrichment=enrichment))
-    xosc_path.write_text(generate_openscenario(trace, xodr_path.name))
     return {
-        "output_path": _relative_output_path(xodr_path.parent),
-        "files": [_relative_output_path(xodr_path), _relative_output_path(xosc_path)],
+        "output_path": _relative_output_path(xodr_path),
         "enrichment": enrichment.provider if enrichment else None,
         "enrichment_requested": enrich,
         "enrichment_error": enrichment_error,
     }
+
+
+@app.get("/api/traces/{trace_id}/export/openscenario")
+def export_openscenario_only(trace_id: str):
+    """Writes the .xosc referencing the companion .xodr's canonical filename
+    (<trace_id>.xodr) -- doesn't require that file to already exist on disk,
+    same as OpenSCENARIO's own reference-by-filename convention.
+    """
+    trace = _get_trace_or_404(trace_id)
+    xodr_path, xosc_path = scenario_output_paths(trace_id, OUTPUT_DIR)
+    xosc_path.write_text(generate_openscenario(trace, xodr_path.name))
+    return {"output_path": _relative_output_path(xosc_path)}
 
 
 @app.get("/api/traces/{trace_id}/export/adp_yaml")
