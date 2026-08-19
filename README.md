@@ -107,6 +107,9 @@ the "do something about it" side — validate, predict, fix, and export.
    below. The **Enrich with OpenStreetMap (online)** checkbox next to the
    OpenSCENARIO/OpenDRIVE button is optional and off by default — see
    *Online map enrichment* below for what it does and doesn't affect.
+10. **Map (OSM)** (viewport controls, top-left of the canvas) overlays
+    nearby OpenStreetMap roads on the visualizer for the currently loaded
+    trace, once you check it — see *Map overlay in the visualizer* below.
 
 "Reset trace" reloads the original files from disk, discarding all fixes/
 predictions/offset changes made in the session.
@@ -563,17 +566,18 @@ before generating the file:
   "this highway" out of whatever else the query returned, not perfect in
   dense road networks.
 
-**This has no effect on the live visualization or interactive GUI
-performance.** It's wired into exactly one place — the scenario export
-endpoint — behind an off-by-default opt-in; nothing under normal use
-(loading a trace, playback, validation, fixing) calls it, ever. A slow or
-unavailable network never breaks an export either: any failure (offline,
-timeout, DNS, a malformed response) is caught and logged, and the export
-falls back to the exact offline result silently. Successful lookups are
-cached to disk (`output/map_cache/`, keyed by the trace's rounded GPS
-bounding box) so re-exporting the same trace or corpus doesn't re-query
-Overpass every time — both for your own performance and because Overpass
-is shared public infrastructure with fair-use expectations.
+**By default this has no effect on the live visualization or interactive
+GUI performance.** Export enrichment is wired into exactly one place — the
+scenario export endpoint — behind an off-by-default opt-in; nothing under
+normal use (loading a trace, playback, validation, fixing) calls it,
+ever. A slow or unavailable network never breaks an export either: any
+failure (offline, timeout, DNS, a malformed response) is caught and
+logged, and the export falls back to the exact offline result silently.
+Successful lookups are cached to disk (`output/map_cache/`, keyed by the
+trace's rounded GPS bounding box) so re-exporting the same trace or corpus
+doesn't re-query Overpass every time — both for your own performance and
+because Overpass is shared public infrastructure with fair-use
+expectations.
 
 OpenStreetMap has no lane-level boundary geometry (see the map-provider
 comparison this was designed around, further up this file) — this
@@ -584,6 +588,27 @@ small provider interface (`export/map_enrichment.py`'s
 richer HD Live Map product turns out to be available) can be added later
 as a second implementation of that same interface, without changing
 `road_geometry.py`, `opendrive.py`, or the API/GUI wiring at all.
+
+#### Map overlay in the visualizer (also opt-in, also online)
+
+Separately, once a trace is loaded, the **Map (OSM)** checkbox above the
+canvas fetches the same kind of OpenStreetMap road data for that one trace
+and draws it as blue background lines underneath the annotation-derived
+lane markings and vehicles — a quick sanity check of how the recorded
+lanes line up against the real road, not a replacement for either.
+
+- It's per-trace and on demand only: nothing is fetched until you check
+  the box, there's no batch/background version, and unchecking or
+  switching to a different trace clears it (switching back re-fetches).
+- Same never-block guarantee as export enrichment: a failed or
+  unavailable fetch shows the reason next to the checkbox and leaves the
+  box unchecked, it never breaks playback or the rest of the GUI.
+- Backed by a new read-only endpoint,
+  `GET /api/traces/{trace_id}/map_overlay?provider=osm`, which reuses
+  `export/map_enrichment.py`'s provider abstraction and converts the
+  returned road geometry into the same local (x, y) frame as the rest of
+  the scene JSON, so the frontend only ever draws plain canvas
+  coordinates.
 
 ## Known limitations / scope (v1)
 

@@ -116,6 +116,10 @@
             <label class="checkbox-field"><input id="heading-up" type="checkbox" checked /> Lock heading up</label>
             <label class="checkbox-field"><input id="show-lanes" type="checkbox" checked /> Lanes</label>
             <label class="checkbox-field"><input id="show-static" type="checkbox" /> Static objects</label>
+            <label class="checkbox-field" title="Fetch nearby roads from OpenStreetMap and draw them as background context. Requires internet; fetched once per trace, then cached.">
+              <input id="show-map-overlay" type="checkbox" /> Map (OSM)
+            </label>
+            <span id="map-overlay-status" class="map-overlay-status"></span>
           </div>
           <div class="legend">
             <span><i class="swatch ego"></i>Ego</span>

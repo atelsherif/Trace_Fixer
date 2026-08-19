@@ -24,6 +24,7 @@ from trace_fixer.export.opendrive import generate_opendrive
 from trace_fixer.export.openscenario import generate_openscenario
 from trace_fixer.export.report import generate_txt_report, generate_xml_report
 from trace_fixer.geo.populate import populate_global_coords
+from trace_fixer.geo.transform import latlon_to_local
 from trace_fixer.prediction.extrapolate import clear_predictions, predict_all
 from trace_fixer.scene import build_scene_json
 from trace_fixer.store import TraceStore
@@ -147,6 +148,34 @@ def scan_directory(req: ScanRequest):
 def get_scene(trace_id: str):
     trace = _get_trace_or_404(trace_id)
     return JSONResponse(build_scene_json(trace))
+
+
+@app.get("/api/traces/{trace_id}/map_overlay")
+def get_map_overlay(trace_id: str, provider: str = "osm"):
+    """On demand only -- the GUI calls this from an explicit "Show map"
+    toggle after a trace is already loaded, never during normal scene
+    loading/playback/validation/fixing, and never for a batch of traces.
+    Fetches nearby roads from the given online provider and converts them
+    into the same local (x, y) frame as the rest of the scene JSON, so the
+    frontend can draw them as background context with zero extra
+    coordinate handling on its side. A failed/unavailable fetch is
+    reported in the response, not raised -- see export.map_enrichment.
+    """
+    trace = _get_trace_or_404(trace_id)
+    enrichment, error = fetch_enrichment(trace, provider, cache_dir=OUTPUT_DIR / "map_cache")
+    if enrichment is None:
+        return {"ways": [], "provider": provider, "error": error}
+
+    lat0, lon0 = trace.ego.poses[0].lat_deg, trace.ego.poses[0].lon_deg
+    ways = [
+        {
+            "id": way.id,
+            "name": way.name,
+            "points": [list(latlon_to_local(lat, lon, lat0, lon0)) for lat, lon in way.points],
+        }
+        for way in enrichment.ways
+    ]
+    return {"ways": ways, "provider": provider, "error": None}
 
 
 @app.post("/api/traces/{trace_id}/validate")

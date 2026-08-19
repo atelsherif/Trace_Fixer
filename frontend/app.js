@@ -13,6 +13,8 @@ const state = {
   selectedVehicleId: null,
   showLanes: true,
   showStatic: false,
+  showMapOverlay: false,
+  mapOverlay: null,
   searchQuery: "",
   selectedTraceIds: new Set(),
   batchRunning: false,
@@ -169,6 +171,10 @@ async function loadTrace(traceId) {
   state.selectedVehicleId = null;
   state.camera.followEgo = true;
   state.camera.followVehicleId = null;
+  state.mapOverlay = null;
+  state.showMapOverlay = false;
+  el("show-map-overlay").checked = false;
+  el("map-overlay-status").textContent = "";
   setStatus(`Loaded ${traceId}: ${scene.vehicles.length} vehicles, ${scene.duration_s.toFixed(1)}s.`);
 }
 
@@ -362,6 +368,8 @@ function draw() {
 
   const lineWidthWorld = 1 / zoom;
 
+  if (state.showMapOverlay && state.mapOverlay) drawMapOverlay(ctx, state.mapOverlay.ways, lineWidthWorld);
+
   if (state.showLanes) drawLines(ctx, state.scene.lane_markings, "#4a5568", lineWidthWorld, false);
   drawLines(ctx, state.scene.border_lines, "#c98a3c", lineWidthWorld * 1.6, true);
 
@@ -414,6 +422,24 @@ function drawLines(ctx, lineGroups, color, lineWidth, dashed) {
       for (let i = 1; i < snap.points.length; i++) ctx.lineTo(snap.points[i][0], snap.points[i][1]);
       ctx.stroke();
     }
+  }
+  ctx.restore();
+}
+
+function drawMapOverlay(ctx, ways, lineWidthWorld) {
+  // Background context from an online map provider (see map_enrichment.py) --
+  // drawn under the annotation-derived lane markings/border lines so the
+  // ground truth this tool is actually validating always stays on top.
+  ctx.save();
+  ctx.strokeStyle = "#3d6fa8";
+  ctx.lineWidth = lineWidthWorld * 2;
+  ctx.setLineDash([]);
+  for (const way of ways) {
+    if (way.points.length < 2) continue;
+    ctx.beginPath();
+    ctx.moveTo(way.points[0][0], way.points[0][1]);
+    for (let i = 1; i < way.points.length; i++) ctx.lineTo(way.points[i][0], way.points[i][1]);
+    ctx.stroke();
   }
   ctx.restore();
 }
@@ -843,6 +869,41 @@ function wireControls() {
   el("gps-readout").addEventListener("click", copyGpsReadout);
   el("show-lanes").addEventListener("change", (e) => { state.showLanes = e.target.checked; draw(); });
   el("show-static").addEventListener("change", (e) => { state.showStatic = e.target.checked; draw(); });
+  el("show-map-overlay").addEventListener("change", async (e) => {
+    const checked = e.target.checked;
+    const statusEl = el("map-overlay-status");
+    if (!checked) {
+      state.showMapOverlay = false;
+      statusEl.textContent = "";
+      draw();
+      return;
+    }
+    if (!state.traceId) {
+      e.target.checked = false;
+      return;
+    }
+    if (state.mapOverlay) {
+      state.showMapOverlay = true;
+      draw();
+      return;
+    }
+    statusEl.textContent = "Fetching map…";
+    try {
+      const data = await apiGet(`/api/traces/${state.traceId}/map_overlay?provider=osm`);
+      if (data.error) {
+        e.target.checked = false;
+        statusEl.textContent = `Map unavailable: ${data.error}`;
+        return;
+      }
+      state.mapOverlay = data;
+      state.showMapOverlay = true;
+      statusEl.textContent = `${data.ways.length} road(s) from ${data.provider}.`;
+      draw();
+    } catch (err) {
+      e.target.checked = false;
+      statusEl.textContent = `Map unavailable: ${err.message || err}`;
+    }
+  });
 
   const c = canvas();
   c.addEventListener("wheel", (e) => {

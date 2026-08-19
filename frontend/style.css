@@ -490,6 +490,12 @@ body {
 
 .legend span { display: flex; align-items: center; gap: 5px; }
 
+.map-overlay-status {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
 .gps-readout {
   position: absolute;
   left: 10px;

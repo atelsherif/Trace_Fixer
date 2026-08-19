@@ -347,3 +347,43 @@ def test_export_scenario_enrich_falls_back_gracefully_on_failure(client_with_cor
     assert data["enrichment"] is None
     assert data["enrichment_requested"] == "osm"
     assert "simulated network failure" in data["enrichment_error"]
+
+
+def test_map_overlay_converts_ways_into_the_scene_local_frame(client_with_corpus, monkeypatch):
+    """No real network call. The returned points must be in the same local
+    (x, y) frame the rest of the scene JSON uses, not raw lat/lon -- that's
+    the whole point of doing the conversion server-side."""
+    import trace_fixer.api as api_module
+    from trace_fixer.export.map_enrichment import BBox, MapEnrichmentResult, MapWay
+
+    client, names, _output_dir = client_with_corpus
+    trace = api_module.store.get(names[0])
+    lat0, lon0 = trace.ego.poses[0].lat_deg, trace.ego.poses[0].lon_deg
+
+    fake_way = MapWay(id=7, points=[(lat0, lon0), (lat0 + 0.001, lon0)], tags={"name": "Test Rd"})
+    fake_result = MapEnrichmentResult(provider="osm", bbox=BBox(0, 0, 0, 0), ways=[fake_way])
+    monkeypatch.setattr(api_module, "fetch_enrichment", lambda *a, **kw: (fake_result, None))
+
+    r = client.get(f"/api/traces/{names[0]}/map_overlay")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["error"] is None
+    assert len(data["ways"]) == 1
+    way = data["ways"][0]
+    assert way["name"] == "Test Rd"
+    # the first point is the trace's own anchor -> must land at local (0, 0)
+    assert way["points"][0] == pytest.approx([0.0, 0.0], abs=1e-6)
+    assert way["points"][1][1] > 50  # ~0.001 deg north is ~111m -> a real local offset, not a raw lat/lon
+
+
+def test_map_overlay_reports_error_without_failing(client_with_corpus, monkeypatch):
+    import trace_fixer.api as api_module
+
+    client, names, _output_dir = client_with_corpus
+    monkeypatch.setattr(api_module, "fetch_enrichment", lambda *a, **kw: (None, "simulated failure"))
+
+    r = client.get(f"/api/traces/{names[0]}/map_overlay")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["ways"] == []
+    assert data["error"] == "simulated failure"
