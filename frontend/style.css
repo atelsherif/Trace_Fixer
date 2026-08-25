@@ -660,7 +660,7 @@ select, input[type="text"] {
   margin: 4px 0;
 }
 
-.text-field input[type="text"] {
+.text-field input[type="text"], .text-field select {
   flex: 1;
   min-width: 0;
 }
@@ -713,8 +713,12 @@ select, input[type="text"] {
 .issue-item.fixed { opacity: 0.5; text-decoration: line-through; }
 .issue-empty { color: var(--text-dim); font-size: 12px; padding: 8px 0; }
 
-.vehicle-list, .event-list, .static-object-list { max-height: 140px; }
-.vehicle-item.selected, .static-object-item.selected { border-color: #4da3ff; background: var(--panel-bg-alt); }
+.vehicle-list, .event-list, .static-object-list, .variant-list { max-height: 140px; }
+.vehicle-item.selected, .static-object-item.selected, .variant-item.selected { border-color: #4da3ff; background: var(--panel-bg-alt); }
+
+.variant-actions { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.variant-actions.hidden { display: none; }
+.variant-actions .button-row button { font-size: 12px; }
 
 .timeline-bar {
   display: flex;

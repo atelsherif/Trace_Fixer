@@ -55,6 +55,7 @@ from dataclasses import dataclass
 import yaml
 from pyproj import Transformer
 
+from trace_fixer.export.openscenario import EGO_HEIGHT_M, EGO_LENGTH_M, EGO_WIDTH_M
 from trace_fixer.geo.transform import heading_to_yaw_rad
 from trace_fixer.models import StaticObs, Trace, VehicleTrack
 
@@ -255,7 +256,7 @@ def _guess_vehicle_model(obj_type: str, length: float, width: float) -> dict:
     }}
 
 
-def _vehicle_timeline(track: VehicleTrack, ego_t0_us: int) -> list[_TimedPoint]:
+def _vehicle_timeline(track: VehicleTrack) -> list[_TimedPoint]:
     return [
         _TimedPoint(
             t_us=obs.t_us,
@@ -280,8 +281,8 @@ def _fill_speeds_from_positions(points: list[_TimedPoint]) -> None:
         points[i].speed_mps = 0.0 if dt <= 0 else math.hypot(p1.x - p0.x, p1.y - p0.y) / dt
 
 
-def _build_ego_agent(trace: Trace, utm_x0: float, utm_y0: float, arc_step_m: float) -> dict:
-    points = [
+def _ego_points(trace: Trace) -> list[_TimedPoint]:
+    return [
         _TimedPoint(
             t_us=p.t_us, x=p.x_m, y=p.y_m,
             yaw_rad=heading_to_yaw_rad(p.heading_deg),
@@ -289,6 +290,9 @@ def _build_ego_agent(trace: Trace, utm_x0: float, utm_y0: float, arc_step_m: flo
         )
         for p in trace.ego.poses
     ]
+
+
+def _build_ego_agent_from_points(points: list[_TimedPoint], utm_x0: float, utm_y0: float, arc_step_m: float) -> dict:
     resampled = _resample_by_arc_length(points, arc_step_m)
     first = points[0]
     behaviors = [_path_following_behavior(first, resampled, utm_x0, utm_y0, terminal_hold=False)]
@@ -304,20 +308,21 @@ def _build_ego_agent(trace: Trace, utm_x0: float, utm_y0: float, arc_step_m: flo
     }
 
 
-def _build_vehicle_obstacle(
-    obj_id: int, track: VehicleTrack, ego_t0_us: int, trace_duration_s: float, utm_x0: float, utm_y0: float,
-    arc_step_m: float,
+def _build_ego_agent(trace: Trace, utm_x0: float, utm_y0: float, arc_step_m: float) -> dict:
+    return _build_ego_agent_from_points(_ego_points(trace), utm_x0, utm_y0, arc_step_m)
+
+
+def _obstacle_from_points(
+    obj_id: int, points: list[_TimedPoint], obj_type: str, length: float, width: float, height: float,
+    t0_us: int, trace_duration_s: float, utm_x0: float, utm_y0: float, arc_step_m: float,
 ) -> dict:
-    points = _vehicle_timeline(track, ego_t0_us)
-    _fill_speeds_from_positions(points)
     first = points[0]
-    length, width, height = track.observations[0].length, track.observations[0].width, track.observations[0].height
-    adp_type = _adp_actor_type(track.obj_type)
+    adp_type = _adp_actor_type(obj_type)
 
     resampled = _resample_by_arc_length(points, arc_step_m)
-    first_seen_s = max(0.0, (first.t_us - ego_t0_us) / 1e6)
+    first_seen_s = max(0.0, (first.t_us - t0_us) / 1e6)
 
-    model = _guess_vehicle_model(track.obj_type, length, width)
+    model = _guess_vehicle_model(obj_type, length, width)
     is_semi_truck = "spectral_model_spec" in model and model["spectral_model_spec"]["spectral_model"] == "CONFIGURABLE_SEMI_TRUCK"
     obstacle: dict = {
         "id": obj_id,
@@ -348,6 +353,34 @@ def _build_vehicle_obstacle(
     return obstacle
 
 
+def _build_vehicle_obstacle(
+    obj_id: int, track: VehicleTrack, t0_us: int, trace_duration_s: float, utm_x0: float, utm_y0: float,
+    arc_step_m: float,
+) -> dict:
+    points = _vehicle_timeline(track)
+    _fill_speeds_from_positions(points)
+    obs0 = track.observations[0]
+    return _obstacle_from_points(
+        obj_id, points, track.obj_type, obs0.length, obs0.width, obs0.height,
+        t0_us, trace_duration_s, utm_x0, utm_y0, arc_step_m,
+    )
+
+
+def _build_ego_as_obstacle(
+    obj_id: int, trace: Trace, t0_us: int, t1_us: int, trace_duration_s: float, utm_x0: float, utm_y0: float,
+    arc_step_m: float,
+) -> dict:
+    """The real ego, re-cast as a regular obstacle for a POV export --
+    truncated to the POV vehicle's own observed window like everything
+    else in that export.
+    """
+    points = [p for p in _ego_points(trace) if t0_us <= p.t_us <= t1_us]
+    return _obstacle_from_points(
+        obj_id, points, "Car", EGO_LENGTH_M, EGO_WIDTH_M, EGO_HEIGHT_M,
+        t0_us, trace_duration_s, utm_x0, utm_y0, arc_step_m,
+    )
+
+
 def _build_static_obstacle(obj_id: int, obs: StaticObs, utm_x0: float, utm_y0: float) -> dict:
     return {
         "id": obj_id,
@@ -371,14 +404,69 @@ def generate_adp_scenario_yaml(
     sensor_include: str = DEFAULT_SENSOR_INCLUDE,
     behavior_config_include: str = DEFAULT_BEHAVIOR_CONFIG_INCLUDE,
     arc_step_m: float = ARC_STEP_M,
+    pov_vehicle_id: int | None = None,
 ) -> str:
+    """By default, "ego" is the recorded ego. `pov_vehicle_id`, when given,
+    re-roots the scenario from that vehicle's point of view instead: its
+    own recorded path becomes "ego", the real ego becomes a regular
+    obstacle, and the whole scenario is truncated to that vehicle's own
+    observed time window -- the only span for which its trajectory is
+    actually known. `map.key` and the road (via the companion .xodr,
+    unaffected by this option) are unchanged either way.
+    """
     if not trace.ego.poses:
         raise ValueError("trace has no ego poses")
+    if pov_vehicle_id is not None and (
+        pov_vehicle_id not in trace.annotation.vehicles or not trace.annotation.vehicles[pov_vehicle_id].observations
+    ):
+        raise ValueError(f"vehicle {pov_vehicle_id} has no observations to use as a POV")
 
     lat0, lon0 = trace.ego.poses[0].lat_deg, trace.ego.poses[0].lon_deg
     utm_x0, utm_y0, zone, north = _utm_origin(lat0, lon0)
-    ego_t0_us = trace.ego.t0_us
-    duration_s = max(0.0, (trace.ego.t1_us - ego_t0_us) / 1e6)
+
+    if pov_vehicle_id is not None:
+        pov_track = trace.annotation.vehicles[pov_vehicle_id]
+        pov_points = _vehicle_timeline(pov_track)
+        _fill_speeds_from_positions(pov_points)
+        t0_us, t1_us = pov_points[0].t_us, pov_points[-1].t_us
+        duration_s = max(0.0, (t1_us - t0_us) / 1e6)
+        ego_agent = {"ego": _build_ego_agent_from_points(pov_points, utm_x0, utm_y0, arc_step_m)}
+        agents = [ego_agent]
+
+        real_ego_points = [p for p in _ego_points(trace) if t0_us <= p.t_us <= t1_us]
+        if len(real_ego_points) >= 2:
+            agents.append({"obstacle": _obstacle_from_points(
+                1, real_ego_points, "Car", EGO_LENGTH_M, EGO_WIDTH_M, EGO_HEIGHT_M,
+                t0_us, duration_s, utm_x0, utm_y0, arc_step_m,
+            )})
+
+        for track in trace.annotation.vehicles.values():
+            if track.obj_id == pov_vehicle_id:
+                continue
+            windowed_obs = [o for o in track.observations if t0_us <= o.t_us <= t1_us]
+            if not windowed_obs:
+                continue
+            obj_id = len(agents)  # agents[0] is ego; ids continue from there
+            points = _vehicle_timeline(track)
+            points = [p for p in points if t0_us <= p.t_us <= t1_us]
+            _fill_speeds_from_positions(points)
+            obs0 = windowed_obs[0]
+            agents.append({"obstacle": _obstacle_from_points(
+                obj_id, points, track.obj_type, obs0.length, obs0.width, obs0.height,
+                t0_us, duration_s, utm_x0, utm_y0, arc_step_m,
+            )})
+    else:
+        t0_us = trace.ego.t0_us
+        duration_s = max(0.0, (trace.ego.t1_us - t0_us) / 1e6)
+        ego_agent = {"ego": _build_ego_agent(trace, utm_x0, utm_y0, arc_step_m)}
+        agents = [ego_agent]
+
+        for obj_id, (_vid, track) in enumerate(sorted(trace.annotation.vehicles.items()), start=1):
+            if not track.observations:
+                continue
+            agents.append({"obstacle": _build_vehicle_obstacle(
+                obj_id, track, t0_us, duration_s, utm_x0, utm_y0, arc_step_m
+            )})
 
     map_key_resolved = map_key or trace.trace_id
     comments = []
@@ -390,16 +478,6 @@ def generate_adp_scenario_yaml(
                 "key ADP registered when that .xodr was imported, or pass map_key explicitly."
             )
         })
-
-    ego_agent = {"ego": _build_ego_agent(trace, utm_x0, utm_y0, arc_step_m)}
-    agents = [ego_agent]
-
-    for obj_id, (_vid, track) in enumerate(sorted(trace.annotation.vehicles.items()), start=1):
-        if not track.observations:
-            continue
-        agents.append({"obstacle": _build_vehicle_obstacle(
-            obj_id, track, ego_t0_us, duration_s, utm_x0, utm_y0, arc_step_m
-        )})
 
     next_id = len(agents) - 1  # agents[0] is ego; ids continue from the last vehicle id used
     for sid, static_obj in sorted(trace.annotation.static_objects.items()):

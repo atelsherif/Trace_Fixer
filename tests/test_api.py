@@ -27,6 +27,7 @@ def client_with_corpus(tmp_path):
     api_module.store = TraceStore(traces_dir=tmp_path / "traces_dir")
     api_module.OUTPUT_DIR = tmp_path / "output"
     api_module.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    api_module._variant_store = {}  # isolate generated variants across tests too
 
     corpus = tmp_path / "corpus"
     names = ["Trace-A", "Trace-B", "Trace-C"]
@@ -509,3 +510,124 @@ def test_map_overlay_reports_error_without_failing(client_with_corpus, monkeypat
     data = r.json()
     assert data["ways"] == []
     assert data["error"] == "simulated failure"
+
+
+# ---------- Alternative scenarios (variants) ----------
+
+def test_generate_variants_preset_mode_returns_a_summary_list(client_with_corpus):
+    client, names, _output_dir = client_with_corpus
+    trace_id = names[0]
+
+    r = client.post(f"/api/traces/{trace_id}/variants/generate", json={"count": 5, "mode": "preset"})
+    assert r.status_code == 200
+    variants = r.json()["variants"]
+    assert len(variants) == 5
+    for v in variants:
+        assert v["variant_id"]
+        assert v["name"]
+        assert v["vehicle_id"] in (1, 2, 3, 4, 5)
+        assert v["source"] in ("preset", "randomized")
+
+
+def test_list_variants_reflects_the_last_generate_call(client_with_corpus):
+    client, names, _output_dir = client_with_corpus
+    trace_id = names[0]
+
+    assert client.get(f"/api/traces/{trace_id}/variants").json()["variants"] == []
+
+    client.post(f"/api/traces/{trace_id}/variants/generate", json={"count": 3, "mode": "preset"})
+    first = client.get(f"/api/traces/{trace_id}/variants").json()["variants"]
+    assert len(first) == 3
+
+    # a second generate call replaces, not accumulates
+    client.post(f"/api/traces/{trace_id}/variants/generate", json={"count": 2, "mode": "randomized", "seed": 1})
+    second = client.get(f"/api/traces/{trace_id}/variants").json()["variants"]
+    assert len(second) == 2
+
+
+def test_generate_variants_randomized_mode_is_reproducible_with_a_seed(client_with_corpus):
+    client, names, _output_dir = client_with_corpus
+    trace_id = names[0]
+
+    r1 = client.post(f"/api/traces/{trace_id}/variants/generate", json={"count": 3, "mode": "randomized", "seed": 7})
+    r2 = client.post(f"/api/traces/{trace_id}/variants/generate", json={"count": 3, "mode": "randomized", "seed": 7})
+    kinds1 = [(v["kind"], v["vehicle_id"]) for v in r1.json()["variants"]]
+    kinds2 = [(v["kind"], v["vehicle_id"]) for v in r2.json()["variants"]]
+    assert kinds1 == kinds2
+
+
+def test_generate_variants_rejects_an_unknown_mode(client_with_corpus):
+    client, names, _output_dir = client_with_corpus
+    r = client.post(f"/api/traces/{names[0]}/variants/generate", json={"mode": "bogus"})
+    assert r.status_code == 400
+
+
+def test_variant_scene_and_exports_round_trip(client_with_corpus):
+    client, names, output_dir = client_with_corpus
+    trace_id = names[0]
+
+    variants = client.post(f"/api/traces/{trace_id}/variants/generate", json={"count": 1}).json()["variants"]
+    variant_id = variants[0]["variant_id"]
+
+    r = client.get(f"/api/traces/{trace_id}/variants/{variant_id}/scene")
+    assert r.status_code == 200
+    assert r.json()["vehicles"]
+
+    r = client.get(f"/api/traces/{trace_id}/variants/{variant_id}/export/fixed_trace")
+    assert r.status_code == 200
+    files = r.json()["files"]
+    assert all(Path(f).exists() for f in files)
+    assert all(variant_id in f for f in files)
+
+    r = client.get(f"/api/traces/{trace_id}/variants/{variant_id}/export/adp_yaml")
+    assert r.status_code == 200
+    assert Path(r.json()["output_path"]).exists()
+
+    r = client.get(f"/api/traces/{trace_id}/variants/{variant_id}/export/report", params={"format": "xml"})
+    assert r.status_code == 200
+    assert Path(r.json()["output_path"]).exists()
+
+    r = client.get(f"/api/traces/{trace_id}/variants/{variant_id}/export/bogus_artifact")
+    assert r.status_code == 400
+
+
+def test_variant_endpoints_404_for_an_unknown_variant(client_with_corpus):
+    client, names, _output_dir = client_with_corpus
+    trace_id = names[0]
+    client.post(f"/api/traces/{trace_id}/variants/generate", json={"count": 1})
+
+    r = client.get(f"/api/traces/{trace_id}/variants/does-not-exist/scene")
+    assert r.status_code == 404
+
+
+# ---------- Vehicle point-of-view export ----------
+
+def test_pov_export_openscenario_and_adp_yaml(client_with_corpus):
+    client, names, output_dir = client_with_corpus
+    trace_id = names[0]
+
+    r = client.get(f"/api/traces/{trace_id}/export/openscenario", params={"pov_vehicle_id": 1})
+    assert r.status_code == 200
+    pov_xosc = output_dir / "scenarios" / trace_id / f"{trace_id}_pov1.xosc"
+    assert pov_xosc.exists()
+    assert Path(r.json()["output_path"]) == pov_xosc
+
+    # the normal (non-POV) file is untouched by the POV export
+    assert not (output_dir / "scenarios" / trace_id / f"{trace_id}.xosc").exists()
+
+    r = client.get(f"/api/traces/{trace_id}/export/adp_yaml", params={"pov_vehicle_id": 1})
+    assert r.status_code == 200
+    pov_yaml = output_dir / "scenarios" / trace_id / f"{trace_id}_pov1.scn.yaml"
+    assert pov_yaml.exists()
+    assert Path(r.json()["output_path"]) == pov_yaml
+
+
+def test_pov_export_400_for_an_unknown_vehicle_id(client_with_corpus):
+    client, names, _output_dir = client_with_corpus
+    trace_id = names[0]
+
+    r = client.get(f"/api/traces/{trace_id}/export/openscenario", params={"pov_vehicle_id": 9999})
+    assert r.status_code == 400
+
+    r = client.get(f"/api/traces/{trace_id}/export/adp_yaml", params={"pov_vehicle_id": 9999})
+    assert r.status_code == 400

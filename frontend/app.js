@@ -19,6 +19,9 @@ const state = {
   searchQuery: "",
   selectedTraceIds: new Set(),
   batchRunning: false,
+  variants: [],
+  activeVariantId: null,
+  baseScene: null, // the real trace's scene, saved while previewing a variant
 };
 
 const el = (id) => document.getElementById(id);
@@ -166,6 +169,13 @@ function onTraceSearchInput(value) {
 }
 
 async function loadTrace(traceId) {
+  // Clear any variant preview from whatever trace was loaded before --
+  // done before fetching the new scene so exiting a stale preview can
+  // never clobber the trace we're about to load.
+  state.activeVariantId = null;
+  state.baseScene = null;
+  el("variant-actions").classList.add("hidden");
+
   state.traceId = traceId;
   el("trace-picker-label").textContent = traceId;
   el("viewport-trace-name").textContent = traceId;
@@ -180,6 +190,7 @@ async function loadTrace(traceId) {
   state.showMapOverlay = false;
   el("show-map-overlay").checked = false;
   el("map-overlay-status").textContent = "";
+  await loadVariantsList();
   setStatus(`Loaded ${traceId}: ${scene.vehicles.length} vehicles, ${scene.duration_s.toFixed(1)}s.`);
 }
 
@@ -258,6 +269,7 @@ function applyScene(scene) {
   renderStaticObjectList();
   renderEventList();
   updateTimeLabel();
+  if (!state.activeVariantId) populatePovVehicleSelect();
 }
 
 // ---------- Interpolation ----------
@@ -698,6 +710,113 @@ function renderStaticObjectList() {
   }
 }
 
+// ---------- POV vehicle select (OpenSCENARIO/ADP scenario export) ----------
+
+function populatePovVehicleSelect() {
+  const select = el("pov-vehicle-select");
+  const prior = select.value;
+  select.innerHTML = '<option value="">Ego (normal)</option>';
+  for (const vehicle of state.scene.vehicles) {
+    const opt = document.createElement("option");
+    opt.value = vehicle.id;
+    opt.textContent = `Vehicle ${vehicle.id} (${vehicle.obj_type})`;
+    select.appendChild(opt);
+  }
+  if (Array.from(select.options).some((o) => o.value === prior)) select.value = prior;
+}
+
+// ---------- Alternative scenarios (variants) ----------
+
+async function loadVariantsList() {
+  if (!state.traceId) return;
+  try {
+    const data = await apiGet(`/api/traces/${state.traceId}/variants`);
+    state.variants = data.variants;
+  } catch {
+    state.variants = [];
+  }
+  renderVariantList();
+}
+
+function renderVariantList() {
+  const list = el("variant-list");
+  list.innerHTML = "";
+  el("variant-count").textContent = state.variants.length;
+  if (!state.variants.length) {
+    const li = document.createElement("li");
+    li.className = "issue-empty";
+    li.textContent = "No alternative scenarios generated yet.";
+    list.appendChild(li);
+    return;
+  }
+  for (const variant of state.variants) {
+    const li = document.createElement("li");
+    li.className = `issue-item variant-item${state.activeVariantId === variant.variant_id ? " selected" : ""}`;
+    const meta = document.createElement("div");
+    meta.className = "issue-meta";
+    meta.textContent = `${variant.name} · veh ${variant.vehicle_id}`;
+    const desc = document.createElement("div");
+    const issueNote =
+      variant.issue_count > variant.base_issue_count
+        ? ` (+${variant.issue_count - variant.base_issue_count} issue(s))`
+        : "";
+    desc.textContent = `${variant.description}${issueNote}`;
+    li.appendChild(meta);
+    li.appendChild(desc);
+    li.addEventListener("click", () => {
+      if (state.activeVariantId === variant.variant_id) {
+        exitVariantPreview();
+      } else {
+        previewVariant(variant.variant_id);
+      }
+    });
+    list.appendChild(li);
+  }
+}
+
+async function generateVariants(mode) {
+  if (!state.traceId) return;
+  el("variant-status").textContent = mode === "randomized" ? "Randomizing…" : "Generating…";
+  try {
+    const body = { count: 5, mode };
+    const data = await apiPost(`/api/traces/${state.traceId}/variants/generate`, body);
+    state.variants = data.variants;
+    exitVariantPreview({ silent: true });
+    renderVariantList();
+    el("variant-status").textContent = `${data.variants.length} scenario(s) generated.`;
+  } catch (err) {
+    el("variant-status").textContent = `Could not generate: ${err.message}`;
+  }
+}
+
+async function previewVariant(variantId) {
+  try {
+    const scene = await apiGet(`/api/traces/${state.traceId}/variants/${variantId}/scene`);
+    if (!state.activeVariantId) state.baseScene = state.scene;
+    state.activeVariantId = variantId;
+    applyScene(scene);
+    const variant = state.variants.find((v) => v.variant_id === variantId);
+    el("viewport-trace-name").textContent = `${state.traceId} — viewing variant: ${variant ? variant.name : variantId}`;
+    el("variant-actions").classList.remove("hidden");
+    renderVariantList();
+    draw();
+  } catch (err) {
+    el("variant-status").textContent = `Could not preview variant: ${err.message}`;
+  }
+}
+
+function exitVariantPreview(opts = {}) {
+  if (state.activeVariantId && state.baseScene) {
+    applyScene(state.baseScene);
+    el("viewport-trace-name").textContent = state.traceId;
+    draw();
+  }
+  state.activeVariantId = null;
+  state.baseScene = null;
+  el("variant-actions").classList.add("hidden");
+  if (!opts.silent) renderVariantList();
+}
+
 // ---------- Event list ----------
 
 function renderEventList() {
@@ -1058,13 +1177,19 @@ function wireControls() {
     const enrich = el("export-enrich-osm").checked ? "?enrich=osm" : "";
     runExport("OpenDRIVE", `/api/traces/${state.traceId}/export/opendrive${enrich}`);
   });
-  el("export-openscenario").addEventListener("click", () =>
-    runExport("OpenSCENARIO", `/api/traces/${state.traceId}/export/openscenario`)
-  );
+  el("export-openscenario").addEventListener("click", () => {
+    const povId = el("pov-vehicle-select").value;
+    const params = povId ? `?pov_vehicle_id=${encodeURIComponent(povId)}` : "";
+    runExport("OpenSCENARIO", `/api/traces/${state.traceId}/export/openscenario${params}`);
+  });
   el("export-adp-yaml").addEventListener("click", () => {
     const mapKey = el("adp-map-key").value.trim();
-    const params = mapKey ? `?map_key=${encodeURIComponent(mapKey)}` : "";
-    runExport("ADP scenario", `/api/traces/${state.traceId}/export/adp_yaml${params}`);
+    const povId = el("pov-vehicle-select").value;
+    const params = new URLSearchParams();
+    if (mapKey) params.set("map_key", mapKey);
+    if (povId) params.set("pov_vehicle_id", povId);
+    const qs = params.toString();
+    runExport("ADP scenario", `/api/traces/${state.traceId}/export/adp_yaml${qs ? `?${qs}` : ""}`);
   });
   el("export-report-txt").addEventListener("click", () =>
     runExport("trace summary", `/api/traces/${state.traceId}/export/report?format=txt`)
@@ -1072,6 +1197,22 @@ function wireControls() {
   el("export-report-xml").addEventListener("click", () =>
     runExport("trace summary", `/api/traces/${state.traceId}/export/report?format=xml`)
   );
+
+  el("variants-generate-preset").addEventListener("click", () => generateVariants("preset"));
+  el("variants-randomize").addEventListener("click", () => generateVariants("randomized"));
+  el("variant-back-to-original").addEventListener("click", () => exitVariantPreview());
+  el("variant-export-fixed").addEventListener("click", () => {
+    if (!state.activeVariantId) return;
+    runExport("variant fixed trace", `/api/traces/${state.traceId}/variants/${state.activeVariantId}/export/fixed_trace`);
+  });
+  el("variant-export-openscenario").addEventListener("click", () => {
+    if (!state.activeVariantId) return;
+    runExport("variant OpenSCENARIO", `/api/traces/${state.traceId}/variants/${state.activeVariantId}/export/openscenario`);
+  });
+  el("variant-export-adp").addEventListener("click", () => {
+    if (!state.activeVariantId) return;
+    runExport("variant ADP scenario", `/api/traces/${state.traceId}/variants/${state.activeVariantId}/export/adp_yaml`);
+  });
 
   el("upload-btn").addEventListener("click", () => el("upload-adma").click());
   el("upload-adma").addEventListener("change", () => {

@@ -9,6 +9,8 @@ OpenSCENARIO/OpenDRIVE scenario bundles, and trace summary reports:
     output/scenarios/<trace_id>/<trace_id>.xodr
     output/scenarios/<trace_id>/<trace_id>.xosc
     output/scenarios/<trace_id>/<trace_id>.scn.yaml
+    output/scenarios/<trace_id>/<trace_id>_pov<vehicle_id>.xosc
+    output/scenarios/<trace_id>/<trace_id>_pov<vehicle_id>.scn.yaml
     output/reports/<trace_id>/<trace_id>_summary.<txt|xml>
 
 Every per-trace export (both the individual GUI download buttons and the
@@ -63,6 +65,18 @@ def adp_yaml_output_path(trace_id: str, output_root: Path) -> Path:
     d = output_root.joinpath(*SCENARIO_SUBDIR, trace_id)
     d.mkdir(parents=True, exist_ok=True)
     return d / f"{trace_id}.scn.yaml"
+
+
+def pov_openscenario_path(trace_id: str, vehicle_id: int, output_root: Path) -> Path:
+    d = output_root.joinpath(*SCENARIO_SUBDIR, trace_id)
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"{trace_id}_pov{vehicle_id}.xosc"
+
+
+def pov_adp_yaml_output_path(trace_id: str, vehicle_id: int, output_root: Path) -> Path:
+    d = output_root.joinpath(*SCENARIO_SUBDIR, trace_id)
+    d.mkdir(parents=True, exist_ok=True)
+    return d / f"{trace_id}_pov{vehicle_id}.scn.yaml"
 
 
 def report_output_path(trace_id: str, output_root: Path, fmt: str) -> Path:

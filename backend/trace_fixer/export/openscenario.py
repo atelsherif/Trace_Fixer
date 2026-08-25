@@ -117,7 +117,57 @@ def _timing_element() -> Element:
     return timing
 
 
-def generate_openscenario(trace: Trace, xodr_filename: str, ego_time_stride: int = 20) -> str:
+REAL_EGO_AS_VEHICLE_NAME = "Vehicle_RealEgo"
+
+
+def _ego_waypoints(poses: list, t0_us: int) -> list[tuple[float, float, float, float]]:
+    """(t_rel_s, x, y, heading_deg) -- EgoPose.heading_deg is ADMA
+    (CCW-from-north) convention, so needs the +90 conversion to match the
+    math convention every other waypoint here (and OpenSCENARIO's own `h`
+    field) uses.
+    """
+    return [((p.t_us - t0_us) / 1e6, p.x_m, p.y_m, (90 + p.heading_deg) % 360) for p in poses]
+
+
+def _vehicle_waypoints(observations: list, t0_us: int) -> list[tuple[float, float, float, float]]:
+    return [((o.t_us - t0_us) / 1e6, o.x_m, o.y_m, o.heading_deg) for o in observations]
+
+
+def generate_openscenario(
+    trace: Trace, xodr_filename: str, ego_time_stride: int = 20, pov_vehicle_id: int | None = None
+) -> str:
+    """By default, replays the recorded ego as "Ego" and every annotated
+    vehicle as a FollowTrajectoryAction entity.
+
+    `pov_vehicle_id`, when given, re-roots the scenario from that vehicle's
+    point of view instead: its own recorded path becomes "Ego", the real
+    ego becomes a regular vehicle entity (`REAL_EGO_AS_VEHICLE_NAME`), and
+    the whole scenario is truncated to that vehicle's own observed time
+    window (its first through last observation) -- the only span for which
+    its trajectory is actually known. The road network (.xodr) is reused
+    unchanged; only which agent is "Ego" and the exported time range
+    change.
+    """
+    if pov_vehicle_id is not None:
+        if pov_vehicle_id not in trace.annotation.vehicles or not trace.annotation.vehicles[pov_vehicle_id].observations:
+            raise ValueError(f"vehicle {pov_vehicle_id} has no observations to use as a POV")
+        pov_track = trace.annotation.vehicles[pov_vehicle_id]
+        pov_obs = sorted(pov_track.observations, key=lambda o: o.t_us)
+        t0_us, t1_us = pov_obs[0].t_us, pov_obs[-1].t_us
+        ego_category = _vehicle_category(pov_track.obj_type)
+        ego_dims = (pov_obs[0].length, pov_obs[0].width, pov_obs[0].height)
+        ego_waypoints = _vehicle_waypoints(pov_obs, t0_us)
+        other_tracks = {
+            vid: track for vid, track in trace.annotation.vehicles.items() if vid != pov_vehicle_id
+        }
+        real_ego_poses = [p for p in trace.ego.poses if t0_us <= p.t_us <= t1_us]
+    else:
+        t0_us, t1_us = trace.ego.t0_us, trace.ego.t1_us
+        ego_category, ego_dims = "car", (EGO_LENGTH_M, EGO_WIDTH_M, EGO_HEIGHT_M)
+        ego_waypoints = _ego_waypoints(_downsample_time(trace.ego.poses, ego_time_stride), t0_us)
+        other_tracks = trace.annotation.vehicles
+        real_ego_poses = []
+
     osc = Element("OpenSCENARIO")
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
     SubElement(osc, "FileHeader", {
@@ -131,44 +181,35 @@ def generate_openscenario(trace: Trace, xodr_filename: str, ego_time_stride: int
     SubElement(road_network, "LogicFile", {"filepath": xodr_filename})
 
     entities = SubElement(osc, "Entities")
-    _vehicle_scenario_object(entities, ENTITY_NAME_EGO, "car", EGO_LENGTH_M, EGO_WIDTH_M, EGO_HEIGHT_M)
-    entity_names = {}
-    for track in trace.annotation.vehicles.values():
-        if not track.observations:
+    _vehicle_scenario_object(entities, ENTITY_NAME_EGO, ego_category, *ego_dims)
+    entity_waypoints: dict[str, list[tuple[float, float, float, float]]] = {}
+    if len(real_ego_poses) >= 2:
+        _vehicle_scenario_object(entities, REAL_EGO_AS_VEHICLE_NAME, "car", EGO_LENGTH_M, EGO_WIDTH_M, EGO_HEIGHT_M)
+        entity_waypoints[REAL_EGO_AS_VEHICLE_NAME] = _ego_waypoints(real_ego_poses, t0_us)
+
+    for track in other_tracks.values():
+        obs = [o for o in track.observations if t0_us <= o.t_us <= t1_us]
+        if not obs:
             continue
         name = f"Vehicle_{track.obj_id}"
-        entity_names[track.obj_id] = name
-        obs0 = track.observations[0]
+        obs0 = obs[0]
         _vehicle_scenario_object(entities, name, _vehicle_category(track.obj_type), obs0.length, obs0.width, obs0.height)
+        entity_waypoints[name] = _vehicle_waypoints(obs, t0_us)
 
     storyboard = SubElement(osc, "Storyboard")
     init = SubElement(storyboard, "Init")
     init_actions = SubElement(init, "Actions")
 
-    t0_us = trace.ego.t0_us
-    ego_poses = _downsample_time(trace.ego.poses, ego_time_stride)
-    ego_waypoints = [
-        ((p.t_us - t0_us) / 1e6, p.x_m, p.y_m, (90 + p.heading_deg) % 360) for p in ego_poses
-    ]
     _teleport_init(init_actions, ENTITY_NAME_EGO, *ego_waypoints[0][1:])
-
-    for track in trace.annotation.vehicles.values():
-        if track.obj_id not in entity_names:
-            continue
-        obs0 = track.observations[0]
-        _teleport_init(init_actions, entity_names[track.obj_id], obs0.x_m, obs0.y_m, obs0.heading_deg)
+    for name, waypoints in entity_waypoints.items():
+        _teleport_init(init_actions, name, *waypoints[0][1:])
 
     story = SubElement(storyboard, "Story", {"name": "MainStory"})
     act = SubElement(story, "Act", {"name": "Act1"})
 
     _follow_trajectory_maneuver_group(act, ENTITY_NAME_EGO, ego_waypoints)
-    for track in trace.annotation.vehicles.values():
-        if track.obj_id not in entity_names:
-            continue
-        waypoints = [
-            ((o.t_us - t0_us) / 1e6, o.x_m, o.y_m, o.heading_deg) for o in track.observations
-        ]
-        _follow_trajectory_maneuver_group(act, entity_names[track.obj_id], waypoints)
+    for name, waypoints in entity_waypoints.items():
+        _follow_trajectory_maneuver_group(act, name, waypoints)
 
     act_start_trigger = SubElement(act, "StartTrigger")
     act_cg = SubElement(act_start_trigger, "ConditionGroup")
@@ -176,7 +217,7 @@ def generate_openscenario(trace: Trace, xodr_filename: str, ego_time_stride: int
     act_bvc = SubElement(act_cond, "ByValueCondition")
     SubElement(act_bvc, "SimulationTimeCondition", {"value": "0", "rule": "greaterThan"})
 
-    duration_s = (trace.ego.t1_us - trace.ego.t0_us) / 1e6
+    duration_s = (t1_us - t0_us) / 1e6
     stop_trigger = SubElement(storyboard, "StopTrigger")
     stop_cg = SubElement(stop_trigger, "ConditionGroup")
     stop_cond = SubElement(stop_cg, "Condition", {"name": "EndCondition", "delay": "0", "conditionEdge": "rising"})

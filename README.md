@@ -117,12 +117,18 @@ fix, and export.
     map enrichment* below for what it does and doesn't affect); **OpenSCENARIO**
     and **ADP scenario (.scn.yaml)** (for ADP, which doesn't read `.xosc` —
     see *ADP YAML export* below, including the optional **Map key** field
-    above the two); and a **trace summary** as `.txt` or `.xml` — see *Trace
-    summary report* below. Every export writes into `output/` and never
-    triggers a browser download — see *Output directory* below.
+    above the two, and the **POV** selector next to it — see *Vehicle
+    point-of-view export* below); and a **trace summary** as `.txt` or
+    `.xml` — see *Trace summary report* below. Every export writes into
+    `output/` and never triggers a browser download — see *Output
+    directory* below.
 11. **Map (OSM)** (viewport controls, top-left of the canvas) overlays
     nearby OpenStreetMap roads on the visualizer for the currently loaded
     trace, once you check it — see *Map overlay in the visualizer* below.
+12. **Alternative Scenarios** (below Export) generates a menu of harder/
+    different scenarios from the current trace by perturbing one
+    surrounding vehicle's trajectory at a time, previewable and separately
+    exportable — see *Alternative scenarios (ODD variants)* below.
 
 "Reset trace" reloads the original files from disk, discarding all fixes/
 predictions/offset changes made in the session.
@@ -376,6 +382,10 @@ backend/trace_fixer/
                                mirroring the input corpus layout for
                                ADMA/annotation (used by every export path,
                                not just the batch action)
+  variants.py                 generates "alternative scenario" Trace copies
+                               by perturbing one surrounding vehicle's
+                               trajectory at a time -- see "Alternative
+                               scenarios (ODD variants)" below
   scan.py                     bulk directory walk + ADMA<->annotation
                                filename matching, for large corpora
   scene.py                    ties it together into one JSON payload
@@ -703,6 +713,85 @@ facts, and are worth checking before trusting a generated file:
   static objects) whenever nothing in that small set is a plausible match.
   A wrong guess only affects the simulation's visuals, never the
   trajectory geometry — a one-line hand-edit in the output file.
+
+## Vehicle point-of-view export
+
+Both OpenSCENARIO and ADP scenario export take an optional **POV**
+selector (in the GUI, above the OpenSCENARIO/ADP scenario buttons; on the
+API, `pov_vehicle_id` on `/export/openscenario` and `/export/adp_yaml`).
+Picking a vehicle re-roots the exported scenario from that vehicle's point
+of view instead of the recorded ego:
+
+- That vehicle's own recorded path becomes "Ego" in the file.
+- The real ego is re-cast as a regular vehicle/obstacle entity.
+- The export is truncated to that vehicle's own observed time window (its
+  first through last annotated observation) — the only span for which its
+  trajectory is actually known — and every other vehicle is filtered to
+  the same window (one with no observations inside it is dropped
+  entirely, rather than emitted as an entity that's never actually
+  present).
+
+The road itself (the companion `.xodr`) is reused completely unchanged —
+its reference line still follows the real ego's own driven path regardless
+of which agent is "Ego" in the scenario file, since the road geometry
+doesn't depend on viewpoint. Written to a separate `<trace_id>_pov<id>`
+file (`.xosc` / `.scn.yaml`) so it never overwrites the normal, ego's-own-
+view export. Since a lot of vehicles in a real recording aren't present
+for the whole clip, this is deliberately scoped to *that vehicle's own
+window* rather than trying to backfill or extrapolate what it would have
+seen outside it.
+
+## Alternative scenarios (ODD variants)
+
+The **Alternative Scenarios** panel (below Export) generates a small menu
+of harder/different scenarios from the currently loaded trace by
+perturbing one surrounding vehicle's already-recorded trajectory at a
+time — the ego's own path and the road never change, only what nearby
+traffic does. See `variants.py`'s module docstring for the full mechanics;
+in short:
+
+- **Generate 5 (presets)** tries five fixed, named, explainable variants,
+  each targeting a real behavior this tool already detects (see *Trace
+  summary report* below) and making it measurably harder:
+  - **Harder cut-in** / **Delayed merge** — the nearest cut-in vehicle
+    merges sooner-and-tighter, or later-and-looser.
+  - **Closer following** — the lead vehicle in the ego's lane keeps a
+    tighter gap for its whole observed window.
+  - **Hard brake ahead** — the lead vehicle brakes hard partway through,
+    closing the gap sharply and not fully recovering it.
+  - **Tighter passing clearance** — the passing/overtaking vehicle stays
+    laterally closer to the ego while going around.
+
+  A preset that finds no matching vehicle in this particular trace (e.g.
+  no cut-in ever happens) is skipped, not forced — the remaining slots are
+  backfilled with randomized variants so a 5-variant request still returns
+  5, where the trace has enough vehicles to support it.
+- **Randomize** generates 5 random perturbations (random vehicle + random
+  kind + random magnitude within safe bounds) instead, seeded for
+  reproducibility from the API (`seed` on `/variants/generate`).
+- Click a variant to preview it in the viewport (the titlebar shows which
+  one you're looking at) and reveal its own export buttons — **Fixed
+  Trace**, **OpenSCENARIO**, **ADP scenario** — writing to a path keyed by
+  that variant so it never collides with the source trace's own exports
+  or another variant's. Click the same variant again, or **← Back to
+  original trace**, to return to the real trace.
+- Each variant's issue count (shown next to it, when higher than the
+  source trace's own) reflects a full re-validation of the perturbed
+  trace — a "harder" variant that ends up genuinely colliding or going
+  off-road is flagged the same way any other trace would be, which is
+  often the point of generating it.
+
+Every variant is a complete, independent copy of the trace (`Trace`
+object) with global coordinates and validation re-run on it, so every
+existing export path works on it completely unchanged — nothing in
+`export/opendrive.py`, `export/openscenario.py`, `export/adp_yaml.py`, or
+`export/report.py` needed to know variants exist at all.
+
+Known simplification: only each vehicle's position (`x_rel`/`y_rel`) is
+perturbed; its own recorded heading (`zrot`) isn't re-derived to match, so
+a sharply time-compressed lateral move won't show a correspondingly
+steeper heading. Good enough for a harder/different *positional* scenario,
+not a substitute for a real vehicle dynamics model.
 
 ## Known limitations / scope (v1)
 

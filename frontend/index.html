@@ -201,9 +201,31 @@
           Map key
           <input id="adp-map-key" type="text" placeholder="(defaults to trace_id)" />
         </label>
+        <label class="text-field" title="Re-root the OpenSCENARIO/ADP scenario export from a chosen vehicle's point of view instead of the ego: that vehicle becomes 'Ego' in the file, the real ego becomes a regular vehicle, and the export is truncated to that vehicle's own observed time window. Doesn't affect OpenDRIVE or Fixed Trace.">
+          POV
+          <select id="pov-vehicle-select"><option value="">Ego (normal)</option></select>
+        </label>
         <div class="button-row">
           <button id="export-report-txt">Trace summary (.txt)</button>
           <button id="export-report-xml">Trace summary (.xml)</button>
+        </div>
+      </div>
+
+      <div class="panel-block">
+        <h2>Alternative Scenarios <span id="variant-count" class="badge">0</span></h2>
+        <div class="button-row">
+          <button id="variants-generate-preset" title="Generate up to 5 named, explainable variants of this trace by perturbing one surrounding vehicle's trajectory at a time -- the ego's path and the road stay fixed.">Generate 5 (presets)</button>
+          <button id="variants-randomize" title="Generate 5 randomized perturbations instead -- seeded, so re-running with the same result is possible from the API.">Randomize</button>
+        </div>
+        <ul id="variant-list" class="issue-list variant-list"></ul>
+        <p id="variant-status" class="scan-status"></p>
+        <div id="variant-actions" class="variant-actions hidden">
+          <div class="button-row">
+            <button id="variant-export-fixed">Fixed Trace</button>
+            <button id="variant-export-openscenario">OpenSCENARIO</button>
+            <button id="variant-export-adp">ADP scenario</button>
+          </div>
+          <button id="variant-back-to-original">&larr; Back to original trace</button>
         </div>
       </div>
     </aside>

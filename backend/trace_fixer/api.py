@@ -17,6 +17,8 @@ from trace_fixer.export.batch_output import (
     adma_output_path,
     adp_yaml_output_path,
     annotation_output_path,
+    pov_adp_yaml_output_path,
+    pov_openscenario_path,
     report_output_path,
     scenario_output_paths,
     write_batch_output,
@@ -32,6 +34,7 @@ from trace_fixer.scene import build_scene_json
 from trace_fixer.store import TraceStore
 from trace_fixer.validation.checks import run_validation
 from trace_fixer.validation.fixes import apply_fixes
+from trace_fixer.variants import Variant, generate_preset_variants, generate_randomized_variants
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DATA_DIR = REPO_ROOT / "data" / "traces"
@@ -459,6 +462,144 @@ def reset(trace_id: str):
     return {"scene": build_scene_json(trace)}
 
 
+class GenerateVariantsRequest(BaseModel):
+    count: int = 5
+    mode: str = "preset"  # "preset" | "randomized"
+    seed: int | None = None
+
+
+# trace_id -> {variant_id -> Variant}. Ephemeral, in-memory, deliberately
+# separate from the TraceStore's own disk-backed cache (see variants.py):
+# a variant has no files on disk to reload from, so it must never be
+# treated like a normal cached trace.
+_variant_store: dict[str, dict[str, Variant]] = {}
+
+
+def _variant_summary(v: Variant) -> dict:
+    return {
+        "variant_id": v.variant_id,
+        "kind": v.kind,
+        "name": v.name,
+        "description": v.description,
+        "vehicle_id": v.vehicle_id,
+        "source": v.source,
+        "issue_count": v.issue_count,
+        "base_issue_count": v.base_issue_count,
+    }
+
+
+def _get_variant_or_404(trace_id: str, variant_id: str) -> Variant:
+    variant = _variant_store.get(trace_id, {}).get(variant_id)
+    if variant is None:
+        raise HTTPException(status_code=404, detail=f"Unknown variant '{variant_id}' for trace '{trace_id}'")
+    return variant
+
+
+@app.post("/api/traces/{trace_id}/variants/generate")
+def generate_variants(trace_id: str, req: GenerateVariantsRequest = GenerateVariantsRequest()):
+    """Generates up to `req.count` alternative ("ODD variant") scenarios by
+    perturbing one surrounding vehicle's recorded trajectory at a time --
+    see variants.py's module docstring. Replaces any previously-generated
+    variants for this trace. "preset" tries five fixed, named, explainable
+    perturbations (skipping ones that find no matching vehicle in this
+    trace, backfilled with randomized ones so `count` is still honored);
+    "randomized" always returns `count` random perturbations (seeded, so
+    the same seed reproduces the same set).
+    """
+    trace = _get_trace_or_404(trace_id)
+    if req.mode == "randomized":
+        result = generate_randomized_variants(trace, req.count, seed=req.seed)
+    elif req.mode == "preset":
+        result = generate_preset_variants(trace, req.count)
+    else:
+        raise HTTPException(status_code=400, detail="mode must be 'preset' or 'randomized'")
+    _variant_store[trace_id] = {v.variant_id: v for v in result}
+    return {"variants": [_variant_summary(v) for v in result]}
+
+
+@app.get("/api/traces/{trace_id}/variants")
+def list_variants(trace_id: str):
+    _get_trace_or_404(trace_id)
+    result = _variant_store.get(trace_id, {})
+    return {"variants": [_variant_summary(v) for v in result.values()]}
+
+
+@app.get("/api/traces/{trace_id}/variants/{variant_id}/scene")
+def get_variant_scene(trace_id: str, variant_id: str):
+    variant = _get_variant_or_404(trace_id, variant_id)
+    return JSONResponse(build_scene_json(variant.trace))
+
+
+@app.get("/api/traces/{trace_id}/variants/{variant_id}/export/{artifact}")
+def export_variant(
+    trace_id: str, variant_id: str, artifact: str,
+    enrich: str | None = None, map_key: str | None = None, author_email: str | None = None,
+    include_predictions: bool = True, format: str = "txt",
+):
+    """Exports one generated variant through exactly the same generators
+    the normal per-trace export endpoints use -- a variant is a complete,
+    independent Trace object (see variants.py), so nothing export-side
+    needs to know it's a variant at all. Writes under a path keyed by the
+    variant's own descriptive trace_id (`<trace_id>__<variant_id>`), so it
+    never collides with the source trace's own exports.
+    """
+    variant = _get_variant_or_404(trace_id, variant_id)
+    trace = variant.trace
+
+    if artifact == "fixed_trace":
+        # Not write_batch_output: its annotation filename resolution
+        # preserves the *original* scanned file's own name verbatim
+        # (resolve_annotation_output_filename), which multiple variants of
+        # the same source trace would all collide on. Variants always get
+        # a name derived from their own composite trace_id instead.
+        adma_path = adma_output_path(trace.trace_id, OUTPUT_DIR)
+        write_adma_csv(trace.ego, adma_path)
+        annotation_path = OUTPUT_DIR / "annotations" / "Annotations" / f"{trace.trace_id}__refQC_IND.xml"
+        annotation_path.parent.mkdir(parents=True, exist_ok=True)
+        write_annotation_xml(
+            trace, store.original_annotation_path(trace_id), annotation_path, include_predictions=include_predictions
+        )
+        return {"files": [_relative_output_path(adma_path), _relative_output_path(annotation_path)]}
+
+    if artifact == "opendrive":
+        enrichment, enrichment_error = None, None
+        if enrich:
+            enrichment, enrichment_error = fetch_enrichment(trace, enrich, cache_dir=OUTPUT_DIR / "map_cache")
+        xodr_path, _xosc_path = scenario_output_paths(trace.trace_id, OUTPUT_DIR)
+        xodr_path.write_text(generate_opendrive(trace, enrichment=enrichment))
+        return {
+            "output_path": _relative_output_path(xodr_path),
+            "enrichment": enrichment.provider if enrichment else None,
+            "enrichment_requested": enrich,
+            "enrichment_error": enrichment_error,
+        }
+
+    if artifact == "openscenario":
+        xodr_path, xosc_path = scenario_output_paths(trace.trace_id, OUTPUT_DIR)
+        xosc_path.write_text(generate_openscenario(trace, xodr_path.name))
+        return {"output_path": _relative_output_path(xosc_path)}
+
+    if artifact == "adp_yaml":
+        text = generate_adp_scenario_yaml(trace, map_key=map_key, author_email=author_email)
+        out_path = adp_yaml_output_path(trace.trace_id, OUTPUT_DIR)
+        out_path.write_text(text)
+        return {
+            "output_path": _relative_output_path(out_path),
+            "map_key": map_key or trace.trace_id,
+            "map_key_is_placeholder": map_key is None,
+        }
+
+    if artifact == "report":
+        if format not in ("txt", "xml"):
+            raise HTTPException(status_code=400, detail="format must be 'txt' or 'xml'")
+        content = generate_xml_report(trace) if format == "xml" else generate_txt_report(trace)
+        out_path = report_output_path(trace.trace_id, OUTPUT_DIR, format)
+        out_path.write_text(content)
+        return {"output_path": _relative_output_path(out_path)}
+
+    raise HTTPException(status_code=400, detail=f"unknown artifact '{artifact}'")
+
+
 def _relative_output_path(path: Path) -> str:
     """Display-friendly path: relative to the repo when possible (the
     normal case), or absolute (e.g. under pytest's tmp_path) otherwise.
@@ -530,19 +671,36 @@ def export_opendrive_only(trace_id: str, enrich: str | None = None):
 
 
 @app.get("/api/traces/{trace_id}/export/openscenario")
-def export_openscenario_only(trace_id: str):
+def export_openscenario_only(trace_id: str, pov_vehicle_id: int | None = None):
     """Writes the .xosc referencing the companion .xodr's canonical filename
     (<trace_id>.xodr) -- doesn't require that file to already exist on disk,
     same as OpenSCENARIO's own reference-by-filename convention.
+
+    `pov_vehicle_id`, when given, re-roots the export from that vehicle's
+    point of view (it becomes "Ego", the real ego becomes a regular
+    vehicle entity, and the export is truncated to that vehicle's own
+    observed window) -- see export.openscenario.generate_openscenario.
+    Written to a separate `<trace_id>_pov<vehicle_id>.xosc` file so it
+    never clobbers the normal export.
     """
     trace = _get_trace_or_404(trace_id)
     xodr_path, xosc_path = scenario_output_paths(trace_id, OUTPUT_DIR)
-    xosc_path.write_text(generate_openscenario(trace, xodr_path.name))
+    if pov_vehicle_id is not None:
+        try:
+            text = generate_openscenario(trace, xodr_path.name, pov_vehicle_id=pov_vehicle_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+        xosc_path = pov_openscenario_path(trace_id, pov_vehicle_id, OUTPUT_DIR)
+    else:
+        text = generate_openscenario(trace, xodr_path.name)
+    xosc_path.write_text(text)
     return {"output_path": _relative_output_path(xosc_path)}
 
 
 @app.get("/api/traces/{trace_id}/export/adp_yaml")
-def export_adp_yaml(trace_id: str, map_key: str | None = None, author_email: str | None = None):
+def export_adp_yaml(
+    trace_id: str, map_key: str | None = None, author_email: str | None = None, pov_vehicle_id: int | None = None
+):
     """ADP (Applied Intuition Simian) `.scn.yaml` -- an alternative to
     OpenSCENARIO for import into ADP, which doesn't read `.xosc`. See
     export.adp_yaml's module docstring for what's derived from real sample
@@ -550,10 +708,23 @@ def export_adp_yaml(trace_id: str, map_key: str | None = None, author_email: str
     to the trace_id here -- matching the .xodr filename ADP registers a map
     key from on import -- and is echoed back in the response so the GUI can
     surface it).
+
+    `pov_vehicle_id`, when given, re-roots the export the same way as
+    /export/openscenario's own POV option, written to a separate
+    `<trace_id>_pov<vehicle_id>.scn.yaml` file.
     """
     trace = _get_trace_or_404(trace_id)
-    text = generate_adp_scenario_yaml(trace, map_key=map_key, author_email=author_email)
-    out_path = adp_yaml_output_path(trace_id, OUTPUT_DIR)
+    try:
+        text = generate_adp_scenario_yaml(
+            trace, map_key=map_key, author_email=author_email, pov_vehicle_id=pov_vehicle_id
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    out_path = (
+        pov_adp_yaml_output_path(trace_id, pov_vehicle_id, OUTPUT_DIR)
+        if pov_vehicle_id is not None
+        else adp_yaml_output_path(trace_id, OUTPUT_DIR)
+    )
     out_path.write_text(text)
     return {
         "output_path": _relative_output_path(out_path),
