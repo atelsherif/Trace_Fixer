@@ -58,6 +58,13 @@ they're cheap to keep visible while you scrub through playback. The
 **right** panel is the "do something about it" side — validate, predict,
 fix, and export.
 
+The viewport draws a world-anchored 10m ground grid (so a highway trace
+with the camera locked to the ego reads as *moving*, not as a static
+picture of near-identical lane markings), the ego's full route as a faint
+line with the driven portion solid over it, and a 3-second fading trail
+behind every visible vehicle — enough to read a cut-in or a lane change
+from a single frame without scrubbing.
+
 1. **Pick a trace** from the trace picker (top bar) — it's a searchable
    list, not a plain dropdown, so it stays usable with a corpus of
    thousands (type to filter; it queries the server rather than holding
@@ -165,13 +172,23 @@ layout like:
 <root>/annotations/Annotations/<trace_name>__ref-QC_IND.xml
 ```
 
-Every `adma.csv` file's trace name is its parent directory's name; every
-`*.xml` file is matched to a trace name by stripping known annotation-suffix
-patterns (`__refQC_IND`, `__ref-QC_IND`, case-insensitive) and falling back
-to a longest-prefix match for anything else. Unmatched files on either side
-are reported in the scan summary rather than silently dropped. Scanned
-traces are registered *by reference* — nothing is copied or parsed until you
-actually open one, so scanning ~20,000 files takes well under a second.
+Every `adma.csv` file's trace name comes from its nearest *distinctive*
+ancestor directory — nearest first, skipping generic container names
+(`adma/`, `data/`, `raw/`, `logs/`, `recordings/`, …). Taking the immediate
+parent unconditionally collapses a corpus laid out as
+`<root>/<trace>/adma/adma.csv` into a single trace called "adma": every
+`adma.csv` shares one derived name, and all but the first are dropped as
+collisions. Every `*.xml` file is matched to a trace name by stripping known
+annotation-suffix patterns (`__refQC_IND`, `__ref-QC_IND`, case-insensitive)
+and falling back to a longest-prefix match for anything else.
+
+The scan summary reports the raw `adma.csv` file count alongside the number
+of distinct trace names it produced, any name collisions, and a sample of
+the unmatched files on both sides — so a corpus that scans to a
+surprisingly low number of pairs can be diagnosed from the GUI rather than
+guessed at. Scanned traces are registered *by reference* — nothing is
+copied or parsed until you actually open one, so scanning ~20,000 files
+takes well under a second.
 
 Type a path directly into the field, or click **Browse…** to navigate the
 filesystem *on the machine running the server* (the normal case for this
@@ -313,11 +330,13 @@ server-side and reports the path it landed at in the status line (e.g.
 "Saved adma to output/adma/ADMA/sample1/adma.csv").
 
 ```
-output/adma/ADMA/<trace_id>/adma.csv
-output/annotations/Annotations/<original annotation filename>
-output/scenarios/<trace_id>/<trace_id>.xodr
-output/scenarios/<trace_id>/<trace_id>.xosc
-output/reports/<trace_id>/<trace_id>_summary.<txt|xml>
+output/adma/ADMA/<trace_id>/adma[__<provenance>].csv
+output/annotations/Annotations/<original annotation stem>[__<provenance>].xml
+output/scenarios/<trace_id>/<trace_id>[__<provenance>].xodr
+output/scenarios/<trace_id>/<trace_id>[__<provenance>].xosc
+output/scenarios/<trace_id>/<trace_id>[__<provenance>].scn.yaml
+output/reports/<trace_id>/<trace_id>_summary[__<provenance>].<txt|xml>
+output/exports.jsonl
 output/catalog.sqlite
 ```
 
@@ -327,6 +346,39 @@ output can be handed off, or re-scanned as input elsewhere, the same way
 the source was. `catalog.sqlite` is the trace catalog (see above) — the one
 thing in `output/` that isn't a per-trace export, since it's a single
 database file covering the whole corpus.
+
+#### Export provenance
+
+`<provenance>` records *which version of the trace* an export came from,
+and it is what keeps exports from overwriting each other:
+
+| Suffix | Means |
+| --- | --- |
+| *(none)* | the trace exactly as recorded |
+| `__fixed` | after **Apply fixes** |
+| `__predicted` | after **Predict outside FOV** |
+| `__fixed__predicted` | both — what the batch pipeline writes by default |
+| `__pov<id>` | re-rooted to a vehicle's point of view (see *Vehicle point-of-view export*) |
+
+Without it, exporting a trace, fixing it, and exporting again writes both
+results to the same path: the second silently replaces the first, and
+neither file says which it is. Alternative scenarios don't take a suffix —
+a variant's identity already lives in its own `trace_id`
+(`<trace_id>__<variant_id>`).
+
+Each batch run stamps every artifact it writes with one shared suffix, so
+a `.xosc` and the `.xodr` it references stay a matched set even when the
+original and the fixed version of a trace have both been exported.
+
+The Export panel says which version its buttons will write ("Exporting:
+original trace" / "fixed trace" / "variant: Harder cut-in"), and its
+**Recent exports** list shows what this trace has already produced.
+
+`output/exports.jsonl` is the same record on disk — one JSON line per
+export with the timestamp, artifact kind, trace, provenance and file paths.
+It is append-only, so a long session's history survives and concurrent
+batch writers can't clobber each other's entries. `GET /api/exports`
+(optionally `?trace_id=…`) reads it back, newest first.
 
 ## Architecture
 
@@ -381,7 +433,9 @@ backend/trace_fixer/
   export/batch_output.py      resolves + writes every export into output/,
                                mirroring the input corpus layout for
                                ADMA/annotation (used by every export path,
-                               not just the batch action)
+                               not just the batch action); stamps each
+                               filename with the trace's provenance and
+                               logs it to output/exports.jsonl
   variants.py                 generates "alternative scenario" Trace copies
                                by perturbing one surrounding vehicle's
                                trajectory at a time -- see "Alternative
@@ -564,6 +618,34 @@ differently:
   behavior the generator always used to have. Consecutive windows with
   matching results merge into a single OpenDRIVE `<laneSection>`, so the
   file only grows a new section where something real actually changes.
+
+- **Where the road sits relative to the ego.** The reference line *is* the
+  ego's path, but the ego drives in a lane, not down the road's centre —
+  so emitting lanes only to the right of the reference line and a
+  `<laneOffset>` of zero puts every vehicle beside the ego off the road in
+  any viewer. Two things fix that:
+
+  - The measured distance from the ego to its own lane's left edge is kept
+    (rather than discarded after being used to bracket the ego's lane) and
+    emitted as a `<laneOffset>` per lane section, shifting the road's
+    centre line off the ego's path to where it actually belongs.
+  - Lanes measured to the *left* of the ego are emitted as real `<left>`
+    lanes with positive ids, in descending id order (outermost first), and
+    the `<lanes>` element is written in the order the spec requires:
+    every `<laneOffset>` first, then each `<laneSection>` with its
+    `left` → `center` → `right` children.
+
+  When no annotation-derived cross-section is available, the fallback
+  splits the majority lane count around the ego using `frame_meta.ego_lane`
+  — which is **1-based counting from the rightmost lane** (verified
+  empirically: `sample1` has `ego_lane=2` of `num_lanes=2` with exactly one
+  lane measured to its right; a middle-lane case like `sample2`'s is
+  symmetric and can't disambiguate the convention on its own). Getting this
+  backwards is not a subtle degradation — it moves the entire road to the
+  wrong side of the traffic. Measured on the sample traces, on-road vehicle
+  placement went from 89.6% → 96.2% (`sample1`) and 35.1% → 80.6%
+  (`sample2`) once offsets, left lanes and the correct `ego_lane`
+  convention were all in place.
 
   **Why this needs to be conservative**: a jaggedly-wrong road (an
   unbounded width spike from one bad frame, a phantom lane from an

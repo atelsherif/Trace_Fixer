@@ -83,3 +83,80 @@ def test_store_list_ids_query_and_limit(tmp_path, corpus):
     assert store.list_ids(query="271") == ["LB-VS-271_20200722_split_038_MERGED"]
     assert len(store.list_ids(limit=1)) == 1
     assert store.list_ids(query="nonexistent") == []
+
+
+def test_trace_name_comes_from_the_nearest_distinctive_directory(tmp_path):
+    """Regression guard: a corpus laid out as <root>/<trace>/adma/adma.csv
+    used to collapse to a single trace called "adma", because the trace
+    name was taken from adma.csv's immediate parent unconditionally.
+    """
+    from trace_fixer.scan import scan_for_trace_pairs
+
+    names = [f"LBVS271_20200722_split_{i:03d}_MERGED" for i in range(5)]
+    for name in names:
+        adma_dir = tmp_path / name / "adma"
+        adma_dir.mkdir(parents=True)
+        (adma_dir / "adma.csv").write_text("x")
+        ann_dir = tmp_path / name / "annotations"
+        ann_dir.mkdir(parents=True)
+        (ann_dir / f"{name}__refQC_IND.xml").write_text("x")
+
+    result = scan_for_trace_pairs(tmp_path)
+    assert result.adma_files_found == 5
+    assert result.adma_found == 5
+    assert set(result.matched) == set(names)
+    assert result.name_collisions == 0
+
+
+def test_generic_directory_names_are_skipped_all_the_way_up(tmp_path):
+    from trace_fixer.scan import scan_for_trace_pairs
+
+    name = "Trace_XYZ"
+    deep = tmp_path / name / "data" / "raw"
+    deep.mkdir(parents=True)
+    (deep / "adma.csv").write_text("x")
+    (tmp_path / name / f"{name}__refQC_IND.xml").write_text("x")
+
+    result = scan_for_trace_pairs(tmp_path)
+    assert set(result.matched) == {name}
+
+
+def test_scan_reports_diagnostics_for_a_corpus_that_matches_poorly(tmp_path):
+    """Counts and examples so a surprisingly low match count can be
+    diagnosed from the GUI instead of guessed at."""
+    from trace_fixer.scan import scan_for_trace_pairs
+
+    paired = tmp_path / "Trace_A"
+    paired.mkdir()
+    (paired / "adma.csv").write_text("x")
+    (paired / "Trace_A__refQC_IND.xml").write_text("x")
+
+    lonely = tmp_path / "Trace_B"  # adma with no annotation
+    lonely.mkdir()
+    (lonely / "adma.csv").write_text("x")
+
+    orphan = tmp_path / "loose"  # annotation matching no trace
+    orphan.mkdir()
+    (orphan / "Completely_Unrelated__refQC_IND.xml").write_text("x")
+
+    result = scan_for_trace_pairs(tmp_path)
+    assert set(result.matched) == {"Trace_A"}
+    assert result.unmatched_adma_count == 1
+    assert "Trace_B" in result.unmatched_adma_examples
+    assert result.unmatched_xml_count == 1
+    assert "Completely_Unrelated__refQC_IND.xml" in result.unmatched_xml_examples
+
+
+def test_colliding_trace_names_are_counted_not_silently_dropped(tmp_path):
+    from trace_fixer.scan import scan_for_trace_pairs
+
+    for run in ("run1", "run2"):
+        d = tmp_path / run / "SameName"
+        d.mkdir(parents=True)
+        (d / "adma.csv").write_text("x")
+    (tmp_path / "SameName__refQC_IND.xml").write_text("x")
+
+    result = scan_for_trace_pairs(tmp_path)
+    assert result.adma_files_found == 2
+    assert result.adma_found == 1
+    assert result.name_collisions == 1

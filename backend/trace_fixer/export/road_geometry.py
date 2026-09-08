@@ -106,8 +106,21 @@ class RefPoint:
 class LaneSectionPlan:
     s_start: float
     num_lanes: int
-    lane_widths_m: list[float]  # one per lane, index 0 = the lane nearest the reference line
+    lane_widths_m: list[float]  # right-side lanes, index 0 = the ego's own lane (nearest the center line)
     source: str  # "annotation" | "osm_default" | "default" -- for transparency/debugging
+    # Lateral offset (OpenDRIVE t) of the lane-stack's center line relative
+    # to the reference line -- i.e. where the ego's own lane's *left edge*
+    # sits. The reference line is the ego's driven path, and the ego does
+    # not drive on its lane's edge, so this is ~half a lane width (measured:
+    # ~1.8-2.5m on the bundled samples). Emitted as <laneOffset>; leaving it
+    # at 0 shifts the whole carriageway right by that much, which put
+    # exported vehicles off the exported road.
+    center_offset_m: float = 0.0
+    # Lanes to the *left* of the ego's own lane, index 0 = nearest the
+    # center line. Emitted as positive-id lanes. Without these, any vehicle
+    # left of the ego (a multi-lane carriageway with the ego not in the
+    # leftmost lane, or an oncoming carriageway) is off-road by construction.
+    left_lane_widths_m: list[float] = field(default_factory=list)
 
 
 @dataclass
@@ -203,6 +216,25 @@ def _cluster_boundaries(t_values: list[float]) -> list[float]:
     return [c[len(c) // 2] for c in clusters]
 
 
+def _majority_ego_lane(trace: Trace) -> int | None:
+    """frame_meta.ego_lane, 1-based counting from the *rightmost* lane
+    (1 = the ego is in the rightmost lane), matching the obj_lane labels'
+    own right-relative convention. Verified against the bundled samples:
+    sample1 reports ego_lane=2 with num_lanes=2 in windows where exactly
+    one lane is measured to the ego's right, and ego_lane=1 where none is.
+    (sample2 can't distinguish the two readings -- ego_lane=2 of 3 is the
+    middle lane either way.) Tells the fallback cross-section where in the
+    carriageway to put the ego, instead of assuming the leftmost lane.
+    """
+    counts: dict[int, int] = {}
+    for m in trace.annotation.frame_meta:
+        if m.ego_lane:
+            counts[m.ego_lane] = counts.get(m.ego_lane, 0) + 1
+    if not counts:
+        return None
+    return max(counts, key=lambda k: counts[k])
+
+
 def _default_section(s_start: float, trace: Trace, lanes_hint: int | None = None) -> LaneSectionPlan:
     """The fallback used wherever the annotation-derived estimate isn't
     trustworthy. `lanes_hint` -- a matched OpenStreetMap way's `lanes` tag,
@@ -212,13 +244,28 @@ def _default_section(s_start: float, trace: Trace, lanes_hint: int | None = None
     rather than this trace's own sparse frame_meta majority. It's still
     just a fallback: a real per-window annotation-derived estimate always
     wins over it (see estimate_lane_sections).
+
+    The ego is placed in the middle of its own lane (the reference line is
+    its driven path), and -- when frame_meta says which lane that is -- with
+    the right number of lanes on each side of it, rather than always at the
+    leftmost lane's left edge.
     """
     if lanes_hint is not None and MIN_LANES <= lanes_hint <= MAX_LANES:
-        return LaneSectionPlan(
-            s_start=s_start, num_lanes=lanes_hint, lane_widths_m=[DEFAULT_LANE_WIDTH_M] * lanes_hint, source="osm_default"
-        )
-    n = _majority_num_lanes(trace)
-    return LaneSectionPlan(s_start=s_start, num_lanes=n, lane_widths_m=[DEFAULT_LANE_WIDTH_M] * n, source="default")
+        total, source = lanes_hint, "osm_default"
+    else:
+        total, source = _majority_num_lanes(trace), "default"
+
+    ego_lane = _majority_ego_lane(trace)  # 1 = rightmost lane
+    n_right = min(ego_lane, total) if ego_lane else total
+    n_left = max(0, total - n_right)
+    return LaneSectionPlan(
+        s_start=s_start,
+        num_lanes=n_right,
+        lane_widths_m=[DEFAULT_LANE_WIDTH_M] * n_right,
+        source=source,
+        center_offset_m=DEFAULT_LANE_WIDTH_M / 2,  # ego mid-lane, not on its lane's edge
+        left_lane_widths_m=[DEFAULT_LANE_WIDTH_M] * n_left,
+    )
 
 
 def _estimate_window(
@@ -253,14 +300,37 @@ def _estimate_window(
     num_lanes = len(right_side) - 1
     if not (MIN_LANES <= num_lanes <= MAX_LANES):
         return None
-    if declared_num_lanes is not None and num_lanes != declared_num_lanes:
-        return None
     widths = [right_side[i + 1] - right_side[i] for i in range(num_lanes)]
     # right_side is ascending (rightmost first); reverse so index 0 = the
     # ego's own lane, matching LaneSectionPlan's contract.
     widths = list(reversed(widths))
     if any(not (MIN_LANE_WIDTH_M <= w <= MAX_LANE_WIDTH_M) for w in widths):
         return None
+
+    # Everything left of the ego's own lane's left edge, as long as the
+    # widths stay plausible -- truncated at the first implausible gap
+    # rather than discarded wholesale, since the near side is the part most
+    # likely to be a real neighbouring lane.
+    left_widths: list[float] = []
+    for i in range(pivot + 1, len(bounds) - 1):
+        w = bounds[i + 1] - bounds[i]
+        if not (MIN_LANE_WIDTH_M <= w <= MAX_LANE_WIDTH_M) or len(left_widths) >= MAX_LANES:
+            break
+        left_widths.append(w)
+
+    # frame_meta.num_lanes is the strongest available cross-check, but it
+    # doesn't say whether it counts the ego's carriageway or every lane in
+    # view. Accept whichever reading it matches: the full stack (ego not in
+    # the leftmost lane -- previously rejected outright, which is why
+    # multi-lane traces fell back to defaults) or the right side alone (the
+    # boundaries to the left being an oncoming carriageway or a road edge).
+    if declared_num_lanes is not None:
+        if num_lanes + len(left_widths) == declared_num_lanes:
+            pass
+        elif num_lanes == declared_num_lanes:
+            left_widths = []
+        else:
+            return None
 
     lane_edges = [right_side[-1]]  # the ego's own lane's left edge, not necessarily 0
     for w in widths:
@@ -277,7 +347,14 @@ def _estimate_window(
     if checked >= 3 and mismatches / checked > 0.3:
         return None
 
-    return LaneSectionPlan(s_start=0.0, num_lanes=num_lanes, lane_widths_m=widths, source="annotation")
+    return LaneSectionPlan(
+        s_start=0.0,
+        num_lanes=num_lanes,
+        lane_widths_m=widths,
+        source="annotation",
+        center_offset_m=right_side[-1],
+        left_lane_widths_m=left_widths,
+    )
 
 
 def _frame_meta_num_lanes_by_window(trace: Trace, ref_points: list[RefPoint]) -> dict[int, int]:
@@ -336,7 +413,13 @@ def estimate_lane_sections(
     # doesn't repeat for MIN_PERSISTENCE_WINDOWS is noise -- flatten it to
     # match its surroundings rather than let it fragment the road.
     def same(a: LaneSectionPlan, b: LaneSectionPlan) -> bool:
-        return a.num_lanes == b.num_lanes and all(abs(x - y) < 0.3 for x, y in zip(a.lane_widths_m, b.lane_widths_m))
+        return (
+            a.num_lanes == b.num_lanes
+            and len(a.left_lane_widths_m) == len(b.left_lane_widths_m)
+            and abs(a.center_offset_m - b.center_offset_m) < 0.3
+            and all(abs(x - y) < 0.3 for x, y in zip(a.lane_widths_m, b.lane_widths_m))
+            and all(abs(x - y) < 0.3 for x, y in zip(a.left_lane_widths_m, b.left_lane_widths_m))
+        )
 
     i = 0
     while i < len(raw):
@@ -344,8 +427,12 @@ def estimate_lane_sections(
         while j + 1 < len(raw) and same(raw[j + 1], raw[i]):
             j += 1
         if j - i + 1 < MIN_PERSISTENCE_WINDOWS and i > 0:
+            prev = raw[i - 1]
             for k in range(i, j + 1):
-                raw[k] = LaneSectionPlan(raw[k].s_start, raw[i - 1].num_lanes, raw[i - 1].lane_widths_m, raw[i - 1].source)
+                raw[k] = LaneSectionPlan(
+                    raw[k].s_start, prev.num_lanes, prev.lane_widths_m, prev.source,
+                    prev.center_offset_m, prev.left_lane_widths_m,
+                )
         i = j + 1
 
     # Merge consecutive identical windows into single sections.

@@ -218,3 +218,64 @@ def test_lanes_hint_out_of_bounds_falls_back_to_annotation_majority(sample1):
     plan = build_road_geometry_plan(sample1, enrichment=enrichment)
     assert plan.road_name == "Weird Road"
     assert all(s.num_lanes != 99 for s in plan.lane_sections)
+
+
+def test_default_section_puts_the_ego_mid_lane_not_on_a_lane_edge(sample1):
+    """The reference line is the ego's driven path, so the fallback
+    cross-section must offset the lane stack by half a lane -- otherwise
+    the ego sits on its own lane's boundary and everything is shifted."""
+    from trace_fixer.export.road_geometry import DEFAULT_LANE_WIDTH_M, _default_section
+
+    section = _default_section(0.0, sample1)
+    assert section.center_offset_m == pytest.approx(DEFAULT_LANE_WIDTH_M / 2)
+
+
+def test_default_section_places_the_ego_using_frame_meta_ego_lane(sample1):
+    """frame_meta.ego_lane is 1-based from the *rightmost* lane, so it says
+    how many lanes belong on each side of the ego rather than assuming it's
+    in the leftmost one."""
+    from trace_fixer.export.road_geometry import _default_section, _majority_ego_lane, _majority_num_lanes
+
+    ego_lane = _majority_ego_lane(sample1)
+    assert ego_lane is not None, "sample1 is expected to carry frame_meta.ego_lane"
+    total = _majority_num_lanes(sample1)
+
+    section = _default_section(0.0, sample1)
+    assert section.num_lanes == min(ego_lane, total)
+    assert len(section.left_lane_widths_m) == max(0, total - min(ego_lane, total))
+
+
+def test_window_estimate_carries_the_measured_lane_edge_as_the_offset():
+    """The ego's own lane's left edge was previously computed for a sanity
+    check and then thrown away; it must survive into the plan."""
+    from trace_fixer.export.road_geometry import _estimate_window
+
+    # boundaries at -7, -3.5, 0.7, 4.2: ego bracketed by -3.5 and 0.7
+    marking_t = [-7.0] * 8 + [-3.5] * 8 + [0.7] * 8 + [4.2] * 8
+    section = _estimate_window(marking_t, [], declared_num_lanes=None)
+    assert section is not None
+    assert section.center_offset_m == pytest.approx(0.7, abs=1e-6)
+    assert len(section.left_lane_widths_m) == 1  # the 0.7 -> 4.2 lane
+    assert section.left_lane_widths_m[0] == pytest.approx(3.5, abs=1e-6)
+
+
+def test_frame_meta_cross_check_accepts_the_ego_outside_the_leftmost_lane():
+    """declared num_lanes may count the whole carriageway. Comparing it
+    against the right-side count alone rejected every window where the ego
+    wasn't leftmost -- which silently forced those traces onto the default
+    cross-section."""
+    from trace_fixer.export.road_geometry import _estimate_window
+
+    marking_t = [-7.0] * 8 + [-3.5] * 8 + [0.7] * 8 + [4.2] * 8  # 2 right + 1 left
+    accepted = _estimate_window(marking_t, [], declared_num_lanes=3)
+    assert accepted is not None
+    assert accepted.num_lanes == 2
+    assert len(accepted.left_lane_widths_m) == 1
+
+    # a declared count matching only the right side keeps the old reading
+    right_only = _estimate_window(marking_t, [], declared_num_lanes=2)
+    assert right_only is not None
+    assert right_only.num_lanes == 2
+    assert right_only.left_lane_widths_m == []
+
+    assert _estimate_window(marking_t, [], declared_num_lanes=5) is None

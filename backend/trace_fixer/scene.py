@@ -211,6 +211,10 @@ def build_scene_json(trace: Trace, max_ego_points: int = 1500) -> dict:
     return {
         "events": _build_events(trace, t0),
         "trace_id": trace.trace_id,
+        # Which version of the trace this scene is -- what the GUI labels
+        # the Export panel with, so it's never ambiguous whether a click
+        # exports the recording or the repaired version of it.
+        "provenance": trace.provenance(),
         "duration_s": duration_s,
         "ego": {"length": EGO_LENGTH_M, "width": EGO_WIDTH_M, "path": ego_path},
         "vehicles": vehicles,

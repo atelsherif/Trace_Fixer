@@ -163,3 +163,21 @@ class Trace:
     annotation: Annotation
     sync_offset_us: int = 0
     issues: list[Issue] = field(default_factory=list)
+
+    def provenance(self) -> list[str]:
+        """How far this trace has been taken from what was recorded --
+        "fixed" once the fix engine has adjusted anything, "predicted" once
+        prediction has added anything, both, or nothing at all.
+
+        The single source of truth for the question "which version of this
+        trace am I looking at?", asked by the GUI (which shows it) and by
+        export (which stamps it into every output filename so one version
+        can't silently overwrite another) alike.
+        """
+        observations = [o for track in self.annotation.vehicles.values() for o in track.observations]
+        parts = []
+        if any(o.fixed for o in observations):
+            parts.append("fixed")
+        if any(o.synthetic for o in observations):
+            parts.append("predicted")
+        return parts

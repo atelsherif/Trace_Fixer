@@ -49,6 +49,66 @@ function setStatus(msg) {
   el("status-line").textContent = msg;
 }
 
+// ---------- Export provenance ----------
+
+/** What the Export panel's buttons will write right now: the recording as
+ * loaded, the repaired/predicted version of it, or a generated variant.
+ * Mirrors the suffix the backend stamps into every export filename (see
+ * export/batch_output.py's provenance_suffix), so what the panel says and
+ * what lands in output/ can't drift apart. */
+function updateExportTarget() {
+  const value = el("export-target-value");
+  const box = el("export-target");
+  if (state.activeVariantId) {
+    const variant = state.variants.find((v) => v.variant_id === state.activeVariantId);
+    value.textContent = `variant: ${variant ? variant.name : state.activeVariantId}`;
+    box.dataset.state = "variant";
+    return;
+  }
+  const parts = (state.scene && state.scene.provenance) || [];
+  value.textContent = parts.length ? `${parts.join(" + ")} trace` : "original trace";
+  box.dataset.state = parts.length ? "derived" : "original";
+}
+
+async function refreshExportLog() {
+  if (!state.traceId) return;
+  const list = el("export-log");
+  try {
+    const data = await apiGet(`/api/exports?limit=12&trace_id=${encodeURIComponent(state.traceId)}`);
+    el("export-log-count").textContent = data.exports.length;
+    list.innerHTML = "";
+    if (!data.exports.length) {
+      const li = document.createElement("li");
+      li.className = "issue-empty";
+      li.textContent = "Nothing exported from this trace yet.";
+      list.appendChild(li);
+      return;
+    }
+    for (const entry of data.exports) {
+      const li = document.createElement("li");
+      li.className = "export-log-item";
+      const head = document.createElement("div");
+      head.className = "export-log-head";
+      head.innerHTML = `<span class="export-log-kind">${entry.kind}</span>`;
+      const prov = document.createElement("span");
+      prov.className = "export-log-prov";
+      prov.textContent = entry.variant_name || entry.provenance;
+      head.appendChild(prov);
+      const files = document.createElement("div");
+      files.className = "export-log-files";
+      // Just the filenames: the directory is the same output/ tree every
+      // time, and the full paths wrap the narrow panel into unreadability.
+      files.textContent = (entry.files || []).map((f) => f.split("/").pop()).join(", ");
+      files.title = (entry.files || []).join("\n");
+      li.appendChild(head);
+      li.appendChild(files);
+      list.appendChild(li);
+    }
+  } catch (err) {
+    list.innerHTML = "";
+  }
+}
+
 async function runExport(label, path) {
   setStatus(`Exporting ${label}…`);
   try {
@@ -65,6 +125,7 @@ async function runExport(label, path) {
       msg += ` (map.key defaulted to "${data.map_key}" -- confirm this matches ADP's registered map key, or set one above)`;
     }
     setStatus(msg);
+    await refreshExportLog();
   } catch (err) {
     setStatus(`Export failed: ${err.message}`);
   }
@@ -191,6 +252,7 @@ async function loadTrace(traceId) {
   el("show-map-overlay").checked = false;
   el("map-overlay-status").textContent = "";
   await loadVariantsList();
+  await refreshExportLog();
   setStatus(`Loaded ${traceId}: ${scene.vehicles.length} vehicles, ${scene.duration_s.toFixed(1)}s.`);
 }
 
@@ -269,6 +331,7 @@ function applyScene(scene) {
   renderStaticObjectList();
   renderEventList();
   updateTimeLabel();
+  updateExportTarget();
   if (!state.activeVariantId) populatePovVehicleSelect();
 }
 
@@ -385,6 +448,11 @@ function draw() {
   ctx.translate(-state.camera.centerX, -state.camera.centerY);
 
   const lineWidthWorld = 1 / zoom;
+  // Half-diagonal of the canvas in world units -- how far from the camera
+  // centre anything can still be on screen, at any camera rotation.
+  const viewRadiusM = Math.hypot(c.width, c.height) / (2 * zoom);
+
+  drawGroundGrid(ctx, state.camera.centerX, state.camera.centerY, viewRadiusM, lineWidthWorld);
 
   if (state.showMapOverlay && state.mapOverlay) drawMapOverlay(ctx, state.mapOverlay.ways, lineWidthWorld);
 
@@ -393,17 +461,22 @@ function draw() {
 
   if (state.showStatic) drawStatic(ctx, state.scene.static_objects, lineWidthWorld, state.selectedStaticObjectId);
 
+  drawEgoRoute(ctx, state.scene.ego.path, state.timeS, lineWidthWorld);
+
   const flagged = activeIssuesAt(state.timeS);
   for (const vehicle of state.scene.vehicles) {
     const v = vehicleAt(vehicle, state.timeS);
     if (!v) continue;
     const isFlagged = flagged.has(vehicle.id);
     const isSelected = state.selectedVehicleId === vehicle.id;
+    const color = v.synthetic ? "#b98cf2" : isFlagged ? "#ff5f6d" : "#6ee7a8";
+    drawTrail(ctx, vehicle.observations, state.timeS, color, lineWidthWorld);
     drawBox(ctx, v.x, v.y, v.heading_deg, v.length, v.width, {
-      fill: v.synthetic ? "#b98cf233" : isFlagged ? "#ff5a5a55" : "#6ee7a855",
-      stroke: v.synthetic ? "#b98cf2" : isFlagged ? "#ff5a5a" : "#6ee7a8",
+      fill: v.synthetic ? "#b98cf233" : isFlagged ? "#ff5f6d55" : "#6ee7a855",
+      stroke: color,
       dashed: v.synthetic,
       lineWidth: (isSelected ? 3 : 1.5) * lineWidthWorld,
+      glow: isFlagged || isSelected ? 14 : 6,
     });
     if (isSelected) {
       ctx.save();
@@ -421,9 +494,84 @@ function draw() {
       fill: "#4da3ff88",
       stroke: "#4da3ff",
       lineWidth: 2 * lineWidthWorld,
+      glow: 16,
     });
   }
 
+  ctx.restore();
+}
+
+const GRID_SPACING_M = 10;
+const MAX_GRID_LINES = 90;  // beyond this the grid is denser than it is legible
+
+/** A world-anchored 10 m grid. Without it a highway trace with the camera
+ * locked to the ego reads as a static picture: the lane markings ahead are
+ * nearly identical frame to frame, so nothing conveys that the ego is
+ * moving at 120 km/h. The grid slides past and makes the speed visible. */
+function drawGroundGrid(ctx, cx, cy, radiusM, lineWidthWorld) {
+  if ((2 * radiusM) / GRID_SPACING_M > MAX_GRID_LINES) return;  // zoomed too far out
+  const x0 = Math.floor((cx - radiusM) / GRID_SPACING_M) * GRID_SPACING_M;
+  const y0 = Math.floor((cy - radiusM) / GRID_SPACING_M) * GRID_SPACING_M;
+  ctx.save();
+  ctx.strokeStyle = "rgba(120, 160, 220, 0.07)";
+  ctx.lineWidth = lineWidthWorld;
+  ctx.beginPath();
+  for (let x = x0; x <= cx + radiusM; x += GRID_SPACING_M) {
+    ctx.moveTo(x, cy - radiusM);
+    ctx.lineTo(x, cy + radiusM);
+  }
+  for (let y = y0; y <= cy + radiusM; y += GRID_SPACING_M) {
+    ctx.moveTo(cx - radiusM, y);
+    ctx.lineTo(cx + radiusM, y);
+  }
+  ctx.stroke();
+  ctx.restore();
+}
+
+/** The ego's whole route as a faint line, with the part already driven
+ * drawn over it solid -- the trace's shape and the current position in it,
+ * both visible without scrubbing the timeline. */
+function drawEgoRoute(ctx, path, tNow, lineWidthWorld) {
+  if (path.length < 2) return;
+  ctx.save();
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+
+  ctx.strokeStyle = "rgba(77, 163, 255, 0.16)";
+  ctx.lineWidth = lineWidthWorld * 1.5;
+  ctx.beginPath();
+  ctx.moveTo(path[0].x, path[0].y);
+  for (let i = 1; i < path.length; i++) ctx.lineTo(path[i].x, path[i].y);
+  ctx.stroke();
+
+  ctx.strokeStyle = "rgba(77, 163, 255, 0.55)";
+  ctx.lineWidth = lineWidthWorld * 2;
+  ctx.beginPath();
+  ctx.moveTo(path[0].x, path[0].y);
+  for (let i = 1; i < path.length && path[i].t_s <= tNow; i++) ctx.lineTo(path[i].x, path[i].y);
+  ctx.stroke();
+  ctx.restore();
+}
+
+const TRAIL_SECONDS = 3.0;
+
+/** The last few seconds of a vehicle's path, fading out behind it -- makes
+ * a cut-in or a lane change readable from a single frame. */
+function drawTrail(ctx, observations, tNow, color, lineWidthWorld) {
+  const recent = observations.filter((o) => o.t_s <= tNow && o.t_s >= tNow - TRAIL_SECONDS);
+  if (recent.length < 2) return;
+  ctx.save();
+  ctx.lineCap = "round";
+  ctx.lineWidth = lineWidthWorld * 2;
+  for (let i = 1; i < recent.length; i++) {
+    // Per-segment alpha: one gradient stroke can't fade along a polyline.
+    ctx.globalAlpha = 0.45 * (i / (recent.length - 1));
+    ctx.strokeStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(recent[i - 1].x, recent[i - 1].y);
+    ctx.lineTo(recent[i].x, recent[i].y);
+    ctx.stroke();
+  }
   ctx.restore();
 }
 
@@ -497,7 +645,14 @@ function drawBox(ctx, x, y, headingDeg, length, width, opts) {
   ctx.beginPath();
   ctx.rect(-length / 2, -width / 2, length, width);
   ctx.fill();
+  if (opts.glow) {
+    // shadowBlur is in device pixels, not world units, so it stays a
+    // constant visual halo instead of ballooning as you zoom in.
+    ctx.shadowColor = opts.stroke;
+    ctx.shadowBlur = opts.glow;
+  }
   ctx.stroke();
+  ctx.shadowBlur = 0;
   // forward-direction nose marker
   ctx.beginPath();
   ctx.moveTo(length / 2, 0);
@@ -798,6 +953,7 @@ async function previewVariant(variantId) {
     const variant = state.variants.find((v) => v.variant_id === variantId);
     el("viewport-trace-name").textContent = `${state.traceId} — viewing variant: ${variant ? variant.name : variantId}`;
     el("variant-actions").classList.remove("hidden");
+    updateExportTarget();  // after activeVariantId is set, so it names the variant
     renderVariantList();
     draw();
   } catch (err) {
@@ -814,6 +970,7 @@ function exitVariantPreview(opts = {}) {
   state.activeVariantId = null;
   state.baseScene = null;
   el("variant-actions").classList.add("hidden");
+  updateExportTarget();
   if (!opts.silent) renderVariantList();
 }
 
@@ -860,7 +1017,11 @@ function renderEventList() {
 function updateTimeLabel() {
   const dur = state.scene ? state.scene.duration_s : 0;
   el("time-label").textContent = `${state.timeS.toFixed(2)} / ${dur.toFixed(2)} s`;
-  el("timeline").value = state.timeS;
+  const slider = el("timeline");
+  slider.value = state.timeS;
+  // A range input can't gradient-fill only the played portion on its own;
+  // the track's background reads this to paint up to the thumb.
+  slider.style.setProperty("--fill", `${dur > 0 ? (state.timeS / dur) * 100 : 0}%`);
   updatePlayButtonIcon();
 }
 
@@ -1249,9 +1410,26 @@ async function runScan() {
       el("scan-status").textContent = `Scan failed: ${data.detail || r.status}`;
       return;
     }
-    el("scan-status").textContent =
-      `Found ${data.adma_found} ADMA file(s), ${data.xml_found} annotation file(s) — ` +
-      `matched ${data.matched} pair(s). ${data.total_traces} trace(s) now available.`;
+    const parts = [
+      `Found ${data.adma_files_found ?? data.adma_found} adma.csv file(s) → ${data.adma_found} trace name(s), ` +
+        `${data.xml_found} annotation file(s) — matched ${data.matched} pair(s). ` +
+        `${data.total_traces} trace(s) now available.`,
+    ];
+    if (data.name_collisions) {
+      parts.push(
+        `${data.name_collisions} adma.csv file(s) shared a trace name with another and were skipped — ` +
+          `their folders likely don't identify the trace.`
+      );
+    }
+    if (data.unmatched_adma_count) {
+      const eg = (data.unmatched_adma_examples || []).join(", ");
+      parts.push(`${data.unmatched_adma_count} trace(s) had no matching annotation${eg ? `, e.g. ${eg}` : ""}.`);
+    }
+    if (data.unmatched_xml_count) {
+      const eg = (data.unmatched_xml_examples || []).join(", ");
+      parts.push(`${data.unmatched_xml_count} annotation file(s) matched no trace${eg ? `, e.g. ${eg}` : ""}.`);
+    }
+    el("scan-status").textContent = parts.join("\n");
     const listing = await queryTraces("", 0);
     renderTraceListbox(listing.trace_ids, listing.total, 0);
   } catch (err) {

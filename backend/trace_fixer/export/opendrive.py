@@ -54,9 +54,53 @@ def _emit_plan_view(plan_view: Element, plan: RoadGeometryPlan) -> None:
             SubElement(geometry, "arc", {"curvature": f"{curvature:.6f}"})
 
 
+def _emit_lane(parent: Element, lane_id: int, width_m: float, outermost: bool) -> None:
+    lane = SubElement(parent, "lane", {"id": str(lane_id), "type": "driving", "level": "false"})
+    SubElement(lane, "width", {"sOffset": "0", "a": f"{width_m:.2f}", "b": "0", "c": "0", "d": "0"})
+    SubElement(
+        lane,
+        "roadMark",
+        {
+            "sOffset": "0",
+            "type": "solid" if outermost else "broken",
+            "weight": "standard",
+            "color": "standard",
+            "width": "0.12",
+        },
+    )
+
+
+def _emit_lane_offsets(lanes: Element, plan: RoadGeometryPlan) -> None:
+    """One <laneOffset> per section, shifting the lane stack's center line
+    off the reference line. The reference line is the ego's *driven path*,
+    which runs roughly down the middle of its lane, not along a lane edge --
+    so without this the whole carriageway is anchored half a lane too far
+    right and exported vehicles land off the exported road. Piecewise
+    constant (a step per section), matching how lane widths are already
+    modelled here; a real HD map would use a smooth polynomial profile.
+
+    Must precede every <laneSection> -- ASAM OpenDRIVE fixes that order
+    inside <lanes>.
+    """
+    for section in plan.lane_sections:
+        SubElement(
+            lanes,
+            "laneOffset",
+            {"s": f"{section.s_start:.3f}", "a": f"{section.center_offset_m:.3f}", "b": "0", "c": "0", "d": "0"},
+        )
+
+
 def _emit_lanes(lanes: Element, plan: RoadGeometryPlan) -> None:
     for section in plan.lane_sections:
         lane_section = SubElement(lanes, "laneSection", {"s": f"{section.s_start:.3f}"})
+
+        # ASAM OpenDRIVE fixes the order within a laneSection: left, center, right.
+        if section.left_lane_widths_m:
+            left = SubElement(lane_section, "left")
+            n_left = len(section.left_lane_widths_m)
+            for i in range(n_left, 0, -1):  # descending id: outermost first
+                _emit_lane(left, i, section.left_lane_widths_m[i - 1], outermost=(i == n_left))
+
         center = SubElement(lane_section, "center")
         center_lane = SubElement(center, "lane", {"id": "0", "type": "none", "level": "false"})
         SubElement(
@@ -65,20 +109,7 @@ def _emit_lanes(lanes: Element, plan: RoadGeometryPlan) -> None:
 
         right = SubElement(lane_section, "right")
         for i in range(1, section.num_lanes + 1):
-            width_m = section.lane_widths_m[i - 1]
-            lane = SubElement(right, "lane", {"id": str(-i), "type": "driving", "level": "false"})
-            SubElement(lane, "width", {"sOffset": "0", "a": f"{width_m:.2f}", "b": "0", "c": "0", "d": "0"})
-            SubElement(
-                lane,
-                "roadMark",
-                {
-                    "sOffset": "0",
-                    "type": "broken" if i < section.num_lanes else "solid",
-                    "weight": "standard",
-                    "color": "standard",
-                    "width": "0.12",
-                },
-            )
+            _emit_lane(right, -i, section.lane_widths_m[i - 1], outermost=(i == section.num_lanes))
 
 
 def _emit_objects(road: Element, plan: RoadGeometryPlan) -> None:
@@ -125,7 +156,7 @@ def generate_opendrive(
     _emit_plan_view(plan_view, plan)
 
     lanes = SubElement(road, "lanes")
-    SubElement(lanes, "laneOffset", {"s": "0", "a": "0", "b": "0", "c": "0", "d": "0"})
+    _emit_lane_offsets(lanes, plan)
     _emit_lanes(lanes, plan)
 
     _emit_objects(road, plan)

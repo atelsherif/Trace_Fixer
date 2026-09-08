@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import threading
 from pathlib import Path
 
@@ -17,8 +18,9 @@ from trace_fixer.export.batch_output import (
     adma_output_path,
     adp_yaml_output_path,
     annotation_output_path,
-    pov_adp_yaml_output_path,
-    pov_openscenario_path,
+    MANIFEST_FILENAME,
+    provenance_suffix,
+    record_export,
     report_output_path,
     scenario_output_paths,
     write_batch_output,
@@ -123,6 +125,12 @@ class ScanResponse(BaseModel):
     unmatched_adma_count: int
     unmatched_xml_count: int
     total_traces: int
+    # Diagnostics: a corpus that scans to a surprisingly low number is
+    # otherwise impossible to explain from the GUI (see scan.py).
+    adma_files_found: int = 0
+    name_collisions: int = 0
+    unmatched_adma_examples: list[str] = []
+    unmatched_xml_examples: list[str] = []
 
 
 @app.post("/api/traces/scan", response_model=ScanResponse)
@@ -146,6 +154,10 @@ def scan_directory(req: ScanRequest):
         unmatched_adma_count=result.unmatched_adma_count,
         unmatched_xml_count=result.unmatched_xml_count,
         total_traces=store.count(),
+        adma_files_found=result.adma_files_found,
+        name_collisions=result.name_collisions,
+        unmatched_adma_examples=result.unmatched_adma_examples,
+        unmatched_xml_examples=result.unmatched_xml_examples,
     )
 
 
@@ -264,15 +276,21 @@ def _fix_predict_and_write_output(trace_id: str, opts: FixExportOptions) -> dict
     )
     after = run_validation(trace)
 
+    # One suffix for the whole run, computed after fixing/predicting: every
+    # artifact this call writes describes the same state of the trace, so
+    # they stay grouped under one name instead of the .xodr silently
+    # replacing the previous run's while the .xosc lands beside it.
+    suffix = provenance_suffix(trace)
+
     output_paths: dict[str, str] = {}
     if opts.export_fixed_trace:
         output_paths.update(write_batch_output(
             trace, store.original_annotation_path(trace_id), OUTPUT_DIR,
-            include_predictions=opts.include_predictions_in_output,
+            include_predictions=opts.include_predictions_in_output, suffix=suffix,
         ))
 
     if opts.export_opendrive or opts.export_openscenario:
-        xodr_path, xosc_path = scenario_output_paths(trace_id, OUTPUT_DIR)
+        xodr_path, xosc_path = scenario_output_paths(trace_id, OUTPUT_DIR, suffix)
         if opts.export_opendrive:
             enrichment = None
             if opts.enrich:
@@ -284,19 +302,23 @@ def _fix_predict_and_write_output(trace_id: str, opts: FixExportOptions) -> dict
             output_paths["xosc_path"] = str(xosc_path)
 
     if opts.export_adp_yaml:
-        adp_path = adp_yaml_output_path(trace_id, OUTPUT_DIR)
+        adp_path = adp_yaml_output_path(trace_id, OUTPUT_DIR, suffix)
         adp_path.write_text(generate_adp_scenario_yaml(trace, map_key=opts.map_key, author_email=opts.author_email))
         output_paths["adp_yaml_path"] = str(adp_path)
 
     if opts.export_report_txt:
-        report_path = report_output_path(trace_id, OUTPUT_DIR, "txt")
+        report_path = report_output_path(trace_id, OUTPUT_DIR, "txt", suffix)
         report_path.write_text(generate_txt_report(trace))
         output_paths["report_txt_path"] = str(report_path)
 
     if opts.export_report_xml:
-        report_path = report_output_path(trace_id, OUTPUT_DIR, "xml")
+        report_path = report_output_path(trace_id, OUTPUT_DIR, "xml", suffix)
         report_path.write_text(generate_xml_report(trace))
         output_paths["report_xml_path"] = str(report_path)
+
+    logged = _log_export(
+        "batch_fix_predict", trace_id, suffix, [Path(p) for p in output_paths.values()]
+    ) if output_paths else {"provenance": _provenance_label(suffix)}
 
     return {
         "trace_id": trace_id,
@@ -304,6 +326,7 @@ def _fix_predict_and_write_output(trace_id: str, opts: FixExportOptions) -> dict
         "after_issue_count": len(after),
         "fix_summary": fix_summary,
         "predicted": added,
+        "provenance": logged["provenance"],
         "output": output_paths,
     }
 
@@ -545,6 +568,12 @@ def export_variant(
     """
     variant = _get_variant_or_404(trace_id, variant_id)
     trace = variant.trace
+    # A variant's whole identity is already in its composite trace_id, so it
+    # needs no `fixed`/`predicted` suffix on top -- see provenance_suffix.
+    log = lambda kind, paths, **extra: _log_export(  # noqa: E731
+        kind, trace.trace_id, "", paths, source_trace_id=trace_id, variant_id=variant_id,
+        variant_name=variant.name, **extra,
+    )
 
     if artifact == "fixed_trace":
         # Not write_batch_output: its annotation filename resolution
@@ -559,7 +588,7 @@ def export_variant(
         write_annotation_xml(
             trace, store.original_annotation_path(trace_id), annotation_path, include_predictions=include_predictions
         )
-        return {"files": [_relative_output_path(adma_path), _relative_output_path(annotation_path)]}
+        return log("fixed_trace", [adma_path, annotation_path])
 
     if artifact == "opendrive":
         enrichment, enrichment_error = None, None
@@ -572,12 +601,13 @@ def export_variant(
             "enrichment": enrichment.provider if enrichment else None,
             "enrichment_requested": enrich,
             "enrichment_error": enrichment_error,
+            **log("opendrive", [xodr_path], enrichment=enrichment.provider if enrichment else None),
         }
 
     if artifact == "openscenario":
         xodr_path, xosc_path = scenario_output_paths(trace.trace_id, OUTPUT_DIR)
         xosc_path.write_text(generate_openscenario(trace, xodr_path.name))
-        return {"output_path": _relative_output_path(xosc_path)}
+        return {"output_path": _relative_output_path(xosc_path), **log("openscenario", [xosc_path])}
 
     if artifact == "adp_yaml":
         text = generate_adp_scenario_yaml(trace, map_key=map_key, author_email=author_email)
@@ -587,6 +617,7 @@ def export_variant(
             "output_path": _relative_output_path(out_path),
             "map_key": map_key or trace.trace_id,
             "map_key_is_placeholder": map_key is None,
+            **log("adp_yaml", [out_path], map_key=map_key or trace.trace_id),
         }
 
     if artifact == "report":
@@ -595,7 +626,7 @@ def export_variant(
         content = generate_xml_report(trace) if format == "xml" else generate_txt_report(trace)
         out_path = report_output_path(trace.trace_id, OUTPUT_DIR, format)
         out_path.write_text(content)
-        return {"output_path": _relative_output_path(out_path)}
+        return {"output_path": _relative_output_path(out_path), **log(f"report_{format}", [out_path])}
 
     raise HTTPException(status_code=400, detail=f"unknown artifact '{artifact}'")
 
@@ -610,6 +641,30 @@ def _relative_output_path(path: Path) -> str:
         return str(path)
 
 
+def _provenance_label(suffix: str) -> str:
+    """The filename suffix, spelled for humans. "" means the trace is
+    exactly as it was recorded, which is worth saying out loud rather than
+    leaving as an absence.
+    """
+    if not suffix:
+        return "original"
+    return " + ".join(
+        f"POV vehicle {part[3:]}" if part.startswith("pov") else part for part in suffix.split("__")
+    )
+
+
+def _log_export(kind: str, trace_id: str, suffix: str, paths: list[Path], **extra) -> dict:
+    """Records one export in output/exports.jsonl and returns the fields
+    every export endpoint echoes back. Both halves answer the same question
+    -- which state of which trace produced these files -- one for the GUI's
+    immediate feedback, one for whoever opens output/ a week later.
+    """
+    files = [_relative_output_path(p) for p in paths]
+    provenance = _provenance_label(suffix)
+    record_export(OUTPUT_DIR, {"kind": kind, "trace_id": trace_id, "provenance": provenance, "files": files, **extra})
+    return {"files": files, "provenance": provenance}
+
+
 @app.get("/api/traces/{trace_id}/export/adma")
 def export_adma(trace_id: str):
     """Writes the corrected ADMA CSV into output/ and reports where. Does
@@ -618,18 +673,20 @@ def export_adma(trace_id: str):
     export.batch_output for the layout.
     """
     trace = _get_trace_or_404(trace_id)
-    out_path = adma_output_path(trace_id, OUTPUT_DIR)
+    suffix = provenance_suffix(trace)
+    out_path = adma_output_path(trace_id, OUTPUT_DIR, suffix)
     write_adma_csv(trace.ego, out_path)
-    return {"output_path": _relative_output_path(out_path)}
+    return {"output_path": _relative_output_path(out_path), **_log_export("adma", trace_id, suffix, [out_path])}
 
 
 @app.get("/api/traces/{trace_id}/export/annotation")
 def export_annotation(trace_id: str, include_predictions: bool = True):
     trace = _get_trace_or_404(trace_id)
+    suffix = provenance_suffix(trace)
     original_path = store.original_annotation_path(trace_id)
-    out_path = annotation_output_path(trace_id, original_path, OUTPUT_DIR)
+    out_path = annotation_output_path(trace_id, original_path, OUTPUT_DIR, suffix)
     write_annotation_xml(trace, original_path, out_path, include_predictions=include_predictions)
-    return {"output_path": _relative_output_path(out_path)}
+    return {"output_path": _relative_output_path(out_path), **_log_export("annotation", trace_id, suffix, [out_path])}
 
 
 @app.get("/api/traces/{trace_id}/export/fixed_trace")
@@ -640,10 +697,14 @@ def export_fixed_trace(trace_id: str, include_predictions: bool = True):
     available individually for API callers that only want one file.
     """
     trace = _get_trace_or_404(trace_id)
+    suffix = provenance_suffix(trace)
     paths = write_batch_output(
-        trace, store.original_annotation_path(trace_id), OUTPUT_DIR, include_predictions=include_predictions
+        trace, store.original_annotation_path(trace_id), OUTPUT_DIR,
+        include_predictions=include_predictions, suffix=suffix,
     )
-    return {"files": [_relative_output_path(Path(paths["adma_path"])), _relative_output_path(Path(paths["annotation_path"]))]}
+    return _log_export(
+        "fixed_trace", trace_id, suffix, [Path(paths["adma_path"]), Path(paths["annotation_path"])]
+    )
 
 
 @app.get("/api/traces/{trace_id}/export/opendrive")
@@ -660,13 +721,18 @@ def export_opendrive_only(trace_id: str, enrich: str | None = None):
     if enrich:
         enrichment, enrichment_error = fetch_enrichment(trace, enrich, cache_dir=OUTPUT_DIR / "map_cache")
 
-    xodr_path, _xosc_path = scenario_output_paths(trace_id, OUTPUT_DIR)
+    suffix = provenance_suffix(trace)
+    xodr_path, _xosc_path = scenario_output_paths(trace_id, OUTPUT_DIR, suffix)
     xodr_path.write_text(generate_opendrive(trace, enrichment=enrichment))
     return {
         "output_path": _relative_output_path(xodr_path),
         "enrichment": enrichment.provider if enrichment else None,
         "enrichment_requested": enrich,
         "enrichment_error": enrichment_error,
+        **_log_export(
+            "opendrive", trace_id, suffix, [xodr_path],
+            enrichment=enrichment.provider if enrichment else None,
+        ),
     }
 
 
@@ -680,21 +746,27 @@ def export_openscenario_only(trace_id: str, pov_vehicle_id: int | None = None):
     point of view (it becomes "Ego", the real ego becomes a regular
     vehicle entity, and the export is truncated to that vehicle's own
     observed window) -- see export.openscenario.generate_openscenario.
-    Written to a separate `<trace_id>_pov<vehicle_id>.xosc` file so it
-    never clobbers the normal export.
+    It lands under a `__pov<vehicle_id>` suffix so it never clobbers the
+    normal export.
     """
     trace = _get_trace_or_404(trace_id)
-    xodr_path, xosc_path = scenario_output_paths(trace_id, OUTPUT_DIR)
-    if pov_vehicle_id is not None:
-        try:
-            text = generate_openscenario(trace, xodr_path.name, pov_vehicle_id=pov_vehicle_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc))
-        xosc_path = pov_openscenario_path(trace_id, pov_vehicle_id, OUTPUT_DIR)
-    else:
-        text = generate_openscenario(trace, xodr_path.name)
+    # The road is the same from any point of view, so the .xosc references
+    # the non-POV .xodr -- but one carrying this trace's own provenance
+    # suffix, so a scenario and the road it names stay a matched pair even
+    # when the original and the fixed trace have both been exported.
+    road_suffix = provenance_suffix(trace)
+    suffix = provenance_suffix(trace, pov_vehicle_id=pov_vehicle_id)
+    xodr_path, _ = scenario_output_paths(trace_id, OUTPUT_DIR, road_suffix)
+    _, xosc_path = scenario_output_paths(trace_id, OUTPUT_DIR, suffix)
+    try:
+        text = generate_openscenario(trace, xodr_path.name, pov_vehicle_id=pov_vehicle_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     xosc_path.write_text(text)
-    return {"output_path": _relative_output_path(xosc_path)}
+    return {
+        "output_path": _relative_output_path(xosc_path),
+        **_log_export("openscenario", trace_id, suffix, [xosc_path], references_xodr=xodr_path.name),
+    }
 
 
 @app.get("/api/traces/{trace_id}/export/adp_yaml")
@@ -710,8 +782,8 @@ def export_adp_yaml(
     surface it).
 
     `pov_vehicle_id`, when given, re-roots the export the same way as
-    /export/openscenario's own POV option, written to a separate
-    `<trace_id>_pov<vehicle_id>.scn.yaml` file.
+    /export/openscenario's own POV option, under a `__pov<vehicle_id>`
+    suffix.
     """
     trace = _get_trace_or_404(trace_id)
     try:
@@ -720,16 +792,14 @@ def export_adp_yaml(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-    out_path = (
-        pov_adp_yaml_output_path(trace_id, pov_vehicle_id, OUTPUT_DIR)
-        if pov_vehicle_id is not None
-        else adp_yaml_output_path(trace_id, OUTPUT_DIR)
-    )
+    suffix = provenance_suffix(trace, pov_vehicle_id=pov_vehicle_id)
+    out_path = adp_yaml_output_path(trace_id, OUTPUT_DIR, suffix)
     out_path.write_text(text)
     return {
         "output_path": _relative_output_path(out_path),
         "map_key": map_key or trace_id,
         "map_key_is_placeholder": map_key is None,
+        **_log_export("adp_yaml", trace_id, suffix, [out_path], map_key=map_key or trace_id),
     }
 
 
@@ -742,9 +812,34 @@ def export_report(trace_id: str, format: str = "txt"):
         content = generate_txt_report(trace)
     else:
         raise HTTPException(status_code=400, detail="format must be 'txt' or 'xml'")
-    out_path = report_output_path(trace_id, OUTPUT_DIR, format)
+    suffix = provenance_suffix(trace)
+    out_path = report_output_path(trace_id, OUTPUT_DIR, format, suffix)
     out_path.write_text(content)
-    return {"output_path": _relative_output_path(out_path)}
+    return {
+        "output_path": _relative_output_path(out_path),
+        **_log_export(f"report_{format}", trace_id, suffix, [out_path]),
+    }
+
+
+@app.get("/api/exports")
+def list_exports(limit: int = 50, trace_id: str | None = None):
+    """The tail of output/exports.jsonl, newest first -- what the GUI's
+    "Recent exports" list reads. Malformed lines are skipped rather than
+    failing the whole request: a truncated last line (a batch job killed
+    mid-write) shouldn't hide the history before it.
+    """
+    manifest = OUTPUT_DIR / MANIFEST_FILENAME
+    if not manifest.exists():
+        return {"exports": []}
+    entries = []
+    for line in manifest.read_text().splitlines():
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if trace_id is None or entry.get("trace_id") == trace_id or entry.get("source_trace_id") == trace_id:
+            entries.append(entry)
+    return {"exports": entries[::-1][:limit]}
 
 
 if FRONTEND_DIR.exists():

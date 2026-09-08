@@ -102,13 +102,20 @@ def test_batch_fix_predict_runs_full_pipeline(client_with_corpus):
     xodr_out = Path(out["xodr_path"])
     xosc_out = Path(out["xosc_path"])
     report_out = Path(out["report_txt_path"])
-    assert adma_out == output_dir / "adma" / "ADMA" / names[0] / "adma.csv"
+    # ...under one provenance suffix shared by every artifact of this run,
+    # so the whole set stays identifiable as "the fixed+predicted export"
+    sfx = "__fixed__predicted"
+    assert data["provenance"] == "fixed + predicted"
+    assert adma_out == output_dir / "adma" / "ADMA" / names[0] / f"adma{sfx}.csv"
     assert annotation_out.parent == output_dir / "annotations" / "Annotations"
-    assert xodr_out == output_dir / "scenarios" / names[0] / f"{names[0]}.xodr"
-    assert xosc_out == output_dir / "scenarios" / names[0] / f"{names[0]}.xosc"
-    assert report_out == output_dir / "reports" / names[0] / f"{names[0]}_summary.txt"
+    assert annotation_out.name.endswith(f"{sfx}.xml")
+    assert xodr_out == output_dir / "scenarios" / names[0] / f"{names[0]}{sfx}.xodr"
+    assert xosc_out == output_dir / "scenarios" / names[0] / f"{names[0]}{sfx}.xosc"
+    assert report_out == output_dir / "reports" / names[0] / f"{names[0]}_summary{sfx}.txt"
     for p in (adma_out, annotation_out, xodr_out, xosc_out, report_out):
         assert p.exists()
+    # the .xosc must name the .xodr this same run wrote, not a bare one
+    assert f"{names[0]}{sfx}.xodr" in xosc_out.read_text()
 
 
 def test_batch_fix_predict_404_for_unknown_trace(client_with_corpus):
@@ -160,6 +167,45 @@ def test_individual_export_endpoints_write_to_output_and_report_the_path(client_
     assert report_path.exists()
     assert r.json()["output_path"] == str(report_path)
     assert "<TraceSummary" in report_path.read_text()
+
+
+def test_exports_of_different_trace_states_do_not_overwrite_each_other(client_with_corpus):
+    """Exporting, applying fixes, then exporting again must leave two files
+    that say which is which -- not one file of ambiguous origin."""
+    client, names, output_dir = client_with_corpus
+    trace_id = names[0]
+
+    r = client.get(f"/api/traces/{trace_id}/export/opendrive")
+    assert r.json()["provenance"] == "original"
+
+    client.post(f"/api/traces/{trace_id}/validate")
+    client.post(f"/api/traces/{trace_id}/fix")
+    r = client.get(f"/api/traces/{trace_id}/export/opendrive")
+    assert r.json()["provenance"] == "fixed"
+
+    scenarios = output_dir / "scenarios" / trace_id
+    assert (scenarios / f"{trace_id}.xodr").exists()
+    assert (scenarios / f"{trace_id}__fixed.xodr").exists()
+
+
+def test_exports_endpoint_lists_what_was_written_newest_first(client_with_corpus):
+    client, names, _output_dir = client_with_corpus
+    trace_id = names[0]
+
+    assert client.get("/api/exports").json()["exports"] == []
+
+    client.get(f"/api/traces/{trace_id}/export/adma")
+    client.get(f"/api/traces/{trace_id}/export/opendrive")
+    client.get(f"/api/traces/{names[1]}/export/adma")
+
+    entries = client.get("/api/exports").json()["exports"]
+    assert [e["kind"] for e in entries] == ["adma", "opendrive", "adma"]
+    assert [e["trace_id"] for e in entries] == [names[1], trace_id, trace_id]
+    assert all(e["provenance"] == "original" and e["exported_at"] and e["files"] for e in entries)
+
+    # ...and filters to one trace, so the GUI can show "this trace's exports"
+    mine = client.get("/api/exports", params={"trace_id": trace_id}).json()["exports"]
+    assert [e["kind"] for e in mine] == ["opendrive", "adma"]
 
 
 def test_export_adp_yaml_writes_to_output_and_flags_the_placeholder_map_key(client_with_corpus):
@@ -267,8 +313,8 @@ def test_batch_all_processes_every_registered_trace(client_with_corpus):
     assert status["done"] == 3
     assert status["failed"] == []
     for name in names:
-        assert (output_dir / "adma" / "ADMA" / name / "adma.csv").exists()
-        assert (output_dir / "reports" / name / f"{name}_summary.txt").exists()
+        assert (output_dir / "adma" / "ADMA" / name / "adma__fixed__predicted.csv").exists()
+        assert (output_dir / "reports" / name / f"{name}_summary__fixed__predicted.txt").exists()
 
 
 def test_batch_all_rejects_concurrent_start(client_with_corpus):
@@ -321,7 +367,7 @@ def test_batch_all_fix_catalog_mode_does_both(client_with_corpus):
     assert status["failed"] == []
 
     for name in names:
-        assert (output_dir / "adma" / "ADMA" / name / "adma.csv").exists()
+        assert (output_dir / "adma" / "ADMA" / name / "adma__fixed__predicted.csv").exists()
 
     r = client.get("/api/catalog")
     data = r.json()
@@ -347,14 +393,15 @@ def test_batch_all_run_mode_only_writes_the_selected_export_types(client_with_co
     assert r.status_code == 200
     _wait_for_batch_done(client)
 
+    sfx = "__fixed__predicted"
     assert not (output_dir / "adma").exists()
     assert not (output_dir / "annotations").exists()
     for name in names:
-        assert not (output_dir / "scenarios" / name / f"{name}.xodr").exists()
-        assert not (output_dir / "scenarios" / name / f"{name}.xosc").exists()
-        assert (output_dir / "scenarios" / name / f"{name}.scn.yaml").exists()
-        assert not (output_dir / "reports" / name / f"{name}_summary.txt").exists()
-        assert (output_dir / "reports" / name / f"{name}_summary.xml").exists()
+        assert not (output_dir / "scenarios" / name / f"{name}{sfx}.xodr").exists()
+        assert not (output_dir / "scenarios" / name / f"{name}{sfx}.xosc").exists()
+        assert (output_dir / "scenarios" / name / f"{name}{sfx}.scn.yaml").exists()
+        assert not (output_dir / "reports" / name / f"{name}_summary{sfx}.txt").exists()
+        assert (output_dir / "reports" / name / f"{name}_summary{sfx}.xml").exists()
 
 
 def test_batch_all_run_mode_threads_enrich_through_to_opendrive_only(client_with_corpus, monkeypatch):
@@ -608,7 +655,7 @@ def test_pov_export_openscenario_and_adp_yaml(client_with_corpus):
 
     r = client.get(f"/api/traces/{trace_id}/export/openscenario", params={"pov_vehicle_id": 1})
     assert r.status_code == 200
-    pov_xosc = output_dir / "scenarios" / trace_id / f"{trace_id}_pov1.xosc"
+    pov_xosc = output_dir / "scenarios" / trace_id / f"{trace_id}__pov1.xosc"
     assert pov_xosc.exists()
     assert Path(r.json()["output_path"]) == pov_xosc
 
@@ -617,7 +664,7 @@ def test_pov_export_openscenario_and_adp_yaml(client_with_corpus):
 
     r = client.get(f"/api/traces/{trace_id}/export/adp_yaml", params={"pov_vehicle_id": 1})
     assert r.status_code == 200
-    pov_yaml = output_dir / "scenarios" / trace_id / f"{trace_id}_pov1.scn.yaml"
+    pov_yaml = output_dir / "scenarios" / trace_id / f"{trace_id}__pov1.scn.yaml"
     assert pov_yaml.exists()
     assert Path(r.json()["output_path"]) == pov_yaml
 

@@ -123,3 +123,58 @@ def test_no_objects_element_when_trace_has_no_static_objects(sample1):
     trace.annotation.static_objects.clear()
     root = ET.fromstring(generate_opendrive(trace))
     assert root.find("./road/objects") is None
+
+
+def test_lane_offset_is_emitted_per_section_and_is_non_zero(sample1):
+    """Regression guard for the "exported cars sit off the exported road"
+    bug: the reference line is the ego's driven path, which runs down the
+    middle of its lane, so the lane stack has to be shifted by roughly half
+    a lane via <laneOffset>. Hardcoding a=0 (what this used to emit)
+    anchored the whole carriageway half a lane too far right.
+    """
+    from trace_fixer.export.opendrive import generate_opendrive
+    from trace_fixer.export.road_geometry import build_road_geometry_plan
+
+    plan = build_road_geometry_plan(sample1)
+    root = ET.fromstring(generate_opendrive(sample1))
+    offsets = root.findall("./road/lanes/laneOffset")
+    assert len(offsets) == len(plan.lane_sections)
+    assert any(abs(float(o.get("a"))) > 0.5 for o in offsets), "lane stack is still anchored on the reference line"
+    for offset, section in zip(offsets, plan.lane_sections):
+        assert float(offset.get("a")) == pytest.approx(section.center_offset_m, abs=1e-3)
+        assert float(offset.get("s")) == pytest.approx(section.s_start, abs=1e-3)
+
+
+def test_lane_offsets_precede_lane_sections(sample1):
+    """ASAM OpenDRIVE fixes the order inside <lanes>: every laneOffset
+    before any laneSection."""
+    from trace_fixer.export.opendrive import generate_opendrive
+
+    root = ET.fromstring(generate_opendrive(sample1))
+    tags = [child.tag for child in root.find("./road/lanes")]
+    assert tags, "no lane records emitted"
+    assert tags == sorted(tags, key=lambda t: 0 if t == "laneOffset" else 1)
+
+
+def test_left_lanes_are_emitted_with_positive_ids_in_spec_order(sample1):
+    """Vehicles left of the ego need road surface under them; without left
+    lanes they're off-road by construction. When a section has them, they
+    must be positive-id and precede <center>/<right> per the spec."""
+    from trace_fixer.export.opendrive import generate_opendrive
+    from trace_fixer.export.road_geometry import build_road_geometry_plan
+
+    plan = build_road_geometry_plan(sample1)
+    root = ET.fromstring(generate_opendrive(sample1))
+    sections = root.findall("./road/lanes/laneSection")
+    assert len(sections) == len(plan.lane_sections)
+
+    for section_el, plan_section in zip(sections, plan.lane_sections):
+        order = [c.tag for c in section_el]
+        assert order == sorted(order, key=lambda t: {"left": 0, "center": 1, "right": 2}[t])
+        left_lanes = section_el.findall("./left/lane")
+        assert len(left_lanes) == len(plan_section.left_lane_widths_m)
+        for lane in left_lanes:
+            assert int(lane.get("id")) > 0
+        # emitted outermost-first, so ids descend
+        ids = [int(lane.get("id")) for lane in left_lanes]
+        assert ids == sorted(ids, reverse=True)

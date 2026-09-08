@@ -24,7 +24,7 @@ def test_output_mirrors_input_layout(fixed_trace, tmp_path):
     from trace_fixer.export.batch_output import write_batch_output
 
     output_root = tmp_path / "output"
-    paths = write_batch_output(fixed_trace, SAMPLE_DIR / "annotation.xml", output_root)
+    paths = write_batch_output(fixed_trace, SAMPLE_DIR / "annotation.xml", output_root, suffix="")
 
     adma_path = Path(paths["adma_path"])
     annotation_path = Path(paths["annotation_path"])
@@ -42,8 +42,58 @@ def test_output_preserves_original_filename_for_scanned_traces(fixed_trace, tmp_
     original.parent.mkdir(parents=True)
     original.write_text((SAMPLE_DIR / "annotation.xml").read_text(encoding="iso-8859-1"), encoding="iso-8859-1")
 
-    paths = write_batch_output(fixed_trace, original, output_root)
+    paths = write_batch_output(fixed_trace, original, output_root, suffix="")
     assert Path(paths["annotation_path"]).name == "LB-VS-271_20200722_split_038_MERGED__ref-QC_IND.xml"
+
+
+def test_a_fixed_trace_does_not_overwrite_the_original_export(fixed_trace, tmp_path):
+    """The whole point of the provenance suffix: exporting a trace and then
+    exporting it again after Apply fixes must leave two distinguishable
+    files, not one."""
+    from trace_fixer.export.batch_output import write_batch_output
+    from trace_fixer.scene import load_trace
+
+    output_root = tmp_path / "output"
+    original = load_trace("sample1", SAMPLE_DIR / "adma.csv", SAMPLE_DIR / "annotation.xml")
+
+    before = write_batch_output(original, SAMPLE_DIR / "annotation.xml", output_root)
+    after = write_batch_output(fixed_trace, SAMPLE_DIR / "annotation.xml", output_root)
+
+    assert Path(before["adma_path"]).name == "adma.csv"
+    assert Path(after["adma_path"]).name == "adma__fixed.csv"
+    assert Path(before["annotation_path"]).exists() and Path(after["annotation_path"]).exists()
+
+
+def test_provenance_suffix_names_the_state_the_export_came_from(fixed_trace):
+    from trace_fixer.export.batch_output import provenance_suffix
+    from trace_fixer.prediction.extrapolate import predict_all
+    from trace_fixer.scene import load_trace
+
+    original = load_trace("sample1", SAMPLE_DIR / "adma.csv", SAMPLE_DIR / "annotation.xml")
+    assert provenance_suffix(original) == ""
+    assert provenance_suffix(fixed_trace) == "fixed"
+    assert provenance_suffix(fixed_trace, pov_vehicle_id=7) == "fixed__pov7"
+    # A variant's identity is already in its trace_id, so the perturbation's
+    # own `fixed` flags aren't repeated in the filename.
+    assert provenance_suffix(fixed_trace, is_variant=True) == ""
+
+    predict_all(original, horizon_s=2.0, step_s=0.1, backward=True, forward=False)
+    assert provenance_suffix(original) == "predicted"
+
+
+def test_record_export_appends_one_line_per_export(tmp_path):
+    import json
+
+    from trace_fixer.export.batch_output import MANIFEST_FILENAME, record_export
+
+    record_export(tmp_path, {"kind": "adma", "trace_id": "sample1", "provenance": "original"})
+    record_export(tmp_path, {"kind": "opendrive", "trace_id": "sample1", "provenance": "fixed"})
+
+    lines = (tmp_path / MANIFEST_FILENAME).read_text().splitlines()
+    assert len(lines) == 2
+    entries = [json.loads(line) for line in lines]
+    assert [e["kind"] for e in entries] == ["adma", "opendrive"]
+    assert all(e["exported_at"] for e in entries)  # stamped by record_export, not the caller
 
 
 def test_output_content_is_valid_and_reflects_fixes(fixed_trace, tmp_path):
