@@ -239,6 +239,7 @@ async function loadTrace(traceId) {
 
   state.traceId = traceId;
   el("trace-picker-label").textContent = traceId;
+  el("trace-picker-label").title = traceId;
   el("viewport-trace-name").textContent = traceId;
   const scene = await apiGet(`/api/traces/${traceId}/scene`);
   applyScene(scene);

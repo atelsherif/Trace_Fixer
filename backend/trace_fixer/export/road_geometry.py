@@ -412,10 +412,26 @@ def estimate_lane_sections(
     # Persistence filter: a window that differs from both neighbors and
     # doesn't repeat for MIN_PERSISTENCE_WINDOWS is noise -- flatten it to
     # match its surroundings rather than let it fragment the road.
+    #
+    # Grouping uses *structure* only (lane count on each side), not exact
+    # width/offset -- two independently-estimated 30m windows of the same
+    # real lane essentially never land within 0.3m of each other (real
+    # marking-detection noise is that large on its own), so grouping on
+    # exact numbers made almost every genuinely-persistent annotation
+    # stretch look like a one-off blip and get discarded in favor of
+    # whatever (often default) state preceded it -- observed on a real
+    # corpus trace where this silently dropped annotation-derived lane
+    # data across roughly half the road. Width/offset agreement is still
+    # required to *merge* two windows into one <laneSection> below, so a
+    # persistent-but-noisy stretch survives as several adjacent sections
+    # with their own honest per-window numbers instead of one fabricated
+    # constant, or being erased entirely.
+    def structure(a: LaneSectionPlan) -> tuple[int, int]:
+        return (a.num_lanes, len(a.left_lane_widths_m))
+
     def same(a: LaneSectionPlan, b: LaneSectionPlan) -> bool:
         return (
-            a.num_lanes == b.num_lanes
-            and len(a.left_lane_widths_m) == len(b.left_lane_widths_m)
+            structure(a) == structure(b)
             and abs(a.center_offset_m - b.center_offset_m) < 0.3
             and all(abs(x - y) < 0.3 for x, y in zip(a.lane_widths_m, b.lane_widths_m))
             and all(abs(x - y) < 0.3 for x, y in zip(a.left_lane_widths_m, b.left_lane_widths_m))
@@ -424,7 +440,7 @@ def estimate_lane_sections(
     i = 0
     while i < len(raw):
         j = i
-        while j + 1 < len(raw) and same(raw[j + 1], raw[i]):
+        while j + 1 < len(raw) and structure(raw[j + 1]) == structure(raw[i]):
             j += 1
         if j - i + 1 < MIN_PERSISTENCE_WINDOWS and i > 0:
             prev = raw[i - 1]

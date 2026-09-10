@@ -173,7 +173,12 @@ def test_export_annotation_marks_predictions(trace, tmp_path):
     negative_frame_count = sum(
         1 for t in reparsed.vehicles.values() for o in t.observations if o.frame < 0
     )
-    assert negative_frame_count == 160  # 8 (vehicle, direction) pairs * 20-step default horizon
+    # 8 (vehicle, direction) pairs at the 20-step default horizon (step_s=0.2,
+    # horizon_s=4.0), except vehicles 1, 4 and 5's forward (post-FOV)
+    # prediction: each is last seen behind the ego (x_rel < 0) and gets
+    # REAR_HORIZON_MULTIPLIER's doubled horizon -- see extrapolate.py.
+    # 5 pairs * 20 + 3 pairs * 40 = 220.
+    assert negative_frame_count == 220
 
 
 def test_export_opendrive_and_openscenario_are_well_formed(trace):

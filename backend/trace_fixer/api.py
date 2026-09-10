@@ -43,7 +43,7 @@ DATA_DIR = REPO_ROOT / "data" / "traces"
 OUTPUT_DIR = REPO_ROOT / "output"
 FRONTEND_DIR = REPO_ROOT / "frontend"
 
-app = FastAPI(title="PreTwin")
+app = FastAPI(title="PreTwinner")
 store = TraceStore(traces_dir=DATA_DIR)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 

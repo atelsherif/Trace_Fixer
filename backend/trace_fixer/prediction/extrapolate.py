@@ -28,6 +28,19 @@ DEFAULT_HORIZON_S = 4.0
 DEFAULT_STEP_S = 0.2
 STEER_BLEND = 0.35  # how strongly heading is pulled toward the local road tangent per step
 EDGE_FRAME_MARGIN = 3  # tracks within this many frames of the clip's start/end have nothing missing to predict
+# A vehicle trailing the ego (x_rel < 0, "behind") is disproportionately
+# likely to be near the edge of what the sensor tracks in the first place --
+# rear/side coverage is typically shorter-range than the front cone -- so it
+# drops out of (or hasn't yet entered) the annotated track sooner, and its
+# predicted trail was fading out too quickly to be useful for exactly the
+# case that matters most: a tailgater or a vehicle the ego is pulling away
+# from. Trailing vehicles get a longer predicted horizon than the base
+# value; a vehicle ahead of the ego is unaffected.
+REAR_HORIZON_MULTIPLIER = 2.0
+
+
+def _effective_horizon(anchor: VehicleObs, horizon_s: float) -> float:
+    return horizon_s * REAR_HORIZON_MULTIPLIER if anchor.x_rel < 0 else horizon_s
 
 
 def _wrap_rad(a: float) -> float:
@@ -149,7 +162,7 @@ def predict_backward(
     interp = EgoInterpolator(trace.ego)
     synthetic = _extrapolate(
         first, trace, interp, speed, heading, direction=-1,
-        horizon_s=horizon_s, step_s=step_s, time_bound_us=trace.ego.t0_us,
+        horizon_s=_effective_horizon(first, horizon_s), step_s=step_s, time_bound_us=trace.ego.t0_us,
     )
     synthetic.reverse()
     track.observations = synthetic + [o for o in track.observations if not (o.synthetic and o.t_us < first.t_us)]
@@ -183,7 +196,7 @@ def predict_forward(
     interp = EgoInterpolator(trace.ego)
     synthetic = _extrapolate(
         last, trace, interp, speed, heading, direction=1,
-        horizon_s=horizon_s, step_s=step_s, time_bound_us=trace.ego.t1_us,
+        horizon_s=_effective_horizon(last, horizon_s), step_s=step_s, time_bound_us=trace.ego.t1_us,
     )
     track.observations = [o for o in track.observations if not (o.synthetic and o.t_us > last.t_us)] + synthetic
     return len(synthetic)

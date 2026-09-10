@@ -1,4 +1,4 @@
-# PreTwin
+# PreTwinner
 
 A tool for reviewing, validating, and repairing recorded vehicle-trajectory
 logs before they're used to build simulation scenarios. Each recorded log is
@@ -10,7 +10,7 @@ a pair of files:
   vision) with per-frame vehicle bounding boxes, lane markings, road edges,
   and static objects, all in the ego vehicle's own reference frame.
 
-PreTwin parses both, reconstructs a single consistent global-coordinate
+PreTwinner parses both, reconstructs a single consistent global-coordinate
 scene, replays it in a browser GUI, flags physically-implausible annotation
 data, applies rule-based fixes, predicts a vehicle's likely path before it
 entered the Lidar's field of view, and exports the corrected trace plus an
@@ -24,7 +24,7 @@ PYTHONPATH=backend python3 -m trace_fixer.main   # serves on http://localhost:80
 ```
 
 (The Python package is still named `trace_fixer` internally — only the
-displayed product name changed to PreTwin.)
+displayed product name changed, first to PreTwin and now to PreTwinner.)
 
 Open `http://localhost:8000` in a browser. Two sample traces are bundled
 and load automatically: `sample1` and `sample2` (`data/traces/sample1/`,
@@ -109,7 +109,13 @@ from a single frame without scrubbing.
    overtaking it, or it overtaking the ego, while it's presumably still on
    the road). Predicted segments render dashed/purple and are excluded from
    export unless you ask for them (`include_predictions` on the annotation
-   export).
+   export). A vehicle last (or first) seen *behind* the ego gets twice the
+   base horizon in that direction (`REAR_HORIZON_MULTIPLIER` in
+   `prediction/extrapolate.py`) — rear/side sensor coverage is typically
+   shorter-range than the front cone, so a trailing vehicle (a tailgater,
+   or one the ego is pulling away from) tends to drop out of the track
+   sooner, which is exactly the case where a longer predicted trail
+   matters most.
 8. **Apply fixes** smooths flagged vehicle tracks, clamps positions back
    inside the annotated road corridor, and drops trailing observations that
    still overlap the ego vehicle after smoothing (a common "lost the track
@@ -609,15 +615,27 @@ differently:
     `frame_meta.num_lanes` for that stretch, when available (sparser still,
     but a stronger signal than anything geometrically derived, since it
     isn't subject to the same occlusion/tracking noise),
-  - the same result persists for at least 2 consecutive windows, so one
-    noisy window can't fragment the road into a flickering sequence of
-    spurious lane sections.
+  - the same *structure* (lane count on each side) persists for at least 2
+    consecutive windows, so one noisy window can't fragment the road into
+    a flickering sequence of spurious lane sections. This checks lane
+    *counts*, not exact widths: two independently-estimated 30m windows of
+    the same real lane essentially never land within centimeters of each
+    other (real marking-detection noise is that large on its own), so an
+    earlier version of this check required near-identical widths too --
+    which made almost every genuinely-persistent stretch look like a
+    one-off blip and silently discarded it in favor of whatever state
+    preceded it. Observed on a real corpus trace where this erased
+    annotation-derived lane data across roughly half the road, in turn
+    leaving no left lane modeled for a lane that was genuinely there and
+    putting a real vehicle several meters off-road.
 
   A window that fails any check falls back to the trace's overall majority
   declared lane count and a constant default width (3.5m) — the same
   behavior the generator always used to have. Consecutive windows with
-  matching results merge into a single OpenDRIVE `<laneSection>`, so the
-  file only grows a new section where something real actually changes.
+  matching widths merge into a single OpenDRIVE `<laneSection>`; a
+  persistent-but-noisy stretch instead survives as several adjacent
+  sections, each with its own honest per-window numbers, rather than one
+  fabricated constant or no annotation-derived section at all.
 
 - **Where the road sits relative to the ego.** The reference line *is* the
   ego's path, but the ego drives in a lane, not down the road's centre —

@@ -279,3 +279,58 @@ def test_frame_meta_cross_check_accepts_the_ego_outside_the_leftmost_lane():
     assert right_only.left_lane_widths_m == []
 
     assert _estimate_window(marking_t, [], declared_num_lanes=5) is None
+
+
+def test_persistence_filter_tolerates_width_noise_between_matching_windows():
+    """Regression guard for a real-corpus bug: five consecutive 30m windows
+    of the same physical lane (structurally identical -- same lane count,
+    same left/right split) but with independently-estimated widths that
+    differ by more than the old 0.3m 'same' tolerance (real marking-
+    detection noise routinely does) used to each look like an isolated
+    one-off to the persistence filter and get discarded in favor of
+    whatever state preceded them -- observed on a real trace where this
+    silently erased annotation-derived lane data across roughly half the
+    road, in turn leaving no left lane modeled for a genuinely-present
+    passing lane and putting a real vehicle observed there off-road by
+    several meters. Grouping on structure (lane counts) rather than exact
+    width fixes it: a persistent stretch survives as several honest
+    annotation-sourced sections instead of being erased or averaged away.
+    """
+    from trace_fixer.export.road_geometry import build_reference_polyline, estimate_lane_sections
+    from trace_fixer.models import Annotation, EgoPose, EgoTrace, LaneMarking, LaneSnapshot, Trace
+
+    # heading_deg=270 -> math-convention yaw 0 (see geo.transform.heading_to_yaw_rad),
+    # i.e. "pointing along +x" -- matching the poses' own x_m progression below.
+    poses = [
+        EgoPose(t_us=i * 100_000, lat_deg=0, lon_deg=0, heading_deg=270.0, vx_mps=10, vy_mps=0, vz_mps=0)
+        for i in range(700)
+    ]
+    for i, p in enumerate(poses):
+        p.x_m, p.y_m = float(i), 0.0
+    ego = EgoTrace(poses=poses)
+
+    # Windows 0-2 (s 0-90): no markings at all -> default fallback.
+    # Windows 3-7 (s 90-240): one lane, boundary at t=0 (ego's own edge) and
+    # t=-width, alternating 3.2/3.75m window to window -- same structure
+    # (1 lane, 0 left) throughout, never numerically "same" under the old
+    # 0.3m threshold.
+    snapshots = []
+    widths_by_window = {3: 3.2, 4: 3.75, 5: 3.2, 6: 3.75, 7: 3.2}
+    for w, width in widths_by_window.items():
+        s0 = w * 30.0
+        pts = [(s0 + k, side) for k in range(25) for side in (-width, 0.05)]
+        snapshots.append(LaneSnapshot(t_us=int(s0 * 1e5), frame=w, points_rel=[], points_m=pts))
+    lane_marking = LaneMarking(obj_id=1, lane_type="solid", width=0.12, group=1, snapshots=snapshots)
+    trace = Trace(
+        trace_id="synthetic-persistence",
+        ego=ego,
+        annotation=Annotation(country_code=None, lane_markings={1: lane_marking}),
+    )
+
+    ref = build_reference_polyline(trace)
+    sections = estimate_lane_sections(trace, ref)
+
+    windowed = [s for s in sections if 90.0 <= s.s_start < 240.0]
+    assert len(windowed) == 5, [(s.s_start, s.source) for s in sections]
+    assert all(s.source == "annotation" for s in windowed)
+    assert all(s.num_lanes == 1 and s.left_lane_widths_m == [] for s in windowed)

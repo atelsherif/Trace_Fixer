@@ -146,6 +146,14 @@ body {
   content: "▾";
   color: var(--text-faint);
   font-size: 10px;
+  flex: none;
+}
+
+#trace-picker-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 260px;
 }
 
 .trace-picker-panel, .scan-panel {
@@ -166,7 +174,12 @@ body {
   to { opacity: 1; transform: none; }
 }
 
-.trace-picker-panel { left: 0; }
+.trace-picker-panel {
+  left: 0;
+  /* Real trace filenames run 40-60+ characters -- wider than the 340px
+     shared default so most fit on one wrapped line instead of three. */
+  width: 460px;
+}
 
 /* .scan-picker sits near the right edge of the toolbar -- anchor the panel
    to its right edge instead of its left, or it overflows off-screen. */
@@ -194,11 +207,8 @@ body {
   padding: 7px 9px;
   font-size: 12.5px;
   cursor: pointer;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   border-left: 2px solid transparent;
   transition: background 0.12s var(--ease);
@@ -214,11 +224,16 @@ body {
 
 .trace-listbox-item .trace-listbox-checkbox {
   flex: none;
+  margin-top: 2px;
 }
 
 .trace-listbox-item .trace-listbox-name {
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* Real trace filenames run 40-60+ characters -- wrap rather than
+     ellipsize, so the full name is always readable without a hover or a
+     horizontal scrollbar. */
+  overflow-wrap: anywhere;
+  white-space: normal;
+  line-height: 1.35;
 }
 
 .batch-bar {

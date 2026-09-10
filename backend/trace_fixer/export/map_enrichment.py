@@ -128,7 +128,7 @@ class OSMOverpassProvider:
     # "python-httpx/<version>") its edge layer rejects the request with a
     # 406 rather than serving it -- not a data/query problem, purely this.
     HEADERS = {
-        "User-Agent": "PreTwin-trace-fixer/1.0 (+https://github.com/atelsherif/Trace_Fixer)",
+        "User-Agent": "PreTwinner-trace-fixer/1.0 (+https://github.com/atelsherif/Trace_Fixer)",
         "Accept": "application/json",
     }
 
