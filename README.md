@@ -145,6 +145,46 @@ from a single frame without scrubbing.
    → after issue count so a prediction that introduced new ones is
    visible immediately rather than a silent surprise.
 
+   Two things stop the prediction from contradicting the rest of the
+   scene. Together they took the issues prediction introduces on the
+   bundled `sample1` from 18 to **0** at a 4s horizon, and from 47 to
+   **1** at 6s:
+
+   - **Track continuations.** When an annotation loses a vehicle and
+     re-acquires it a second later it assigns a *new* object id, so one
+     physical vehicle arrives as two tracks with a gap between them.
+     Extrapolating the first forward *and* the second backward fills that
+     gap with two ghosts of the same vehicle, in the same lane, at the
+     same instant — which validation correctly reports as a collision.
+     This was the single largest source of predicted collisions: on
+     `sample1`, vehicles 3 and 4 are one truck either side of a 1.3s
+     tracking gap (same lane, 0.03m apart laterally, 29.7 → 29.3 m/s
+     across it). `find_track_continuations` identifies such pairs and
+     lets only the earlier track predict across the gap, bounded to stop
+     where the later one picks up. The test is deliberately all-or-nothing
+     — same lane label, same object type, matching width, near-identical
+     lateral offset, *and* a gap bridged at within 8 m/s of the speed
+     observed at both ends — because a false positive suppresses a
+     legitimate prediction. On the bundled samples the real pairs bridge
+     their gap within 3 m/s of the observed speed while the nearest false
+     candidate would need 124 m/s (450 km/h). Object *length* is
+     deliberately not compared: a truck half-occluded on first
+     acquisition is measured short and re-measured at full length later
+     (14.0m then 21.6m for the same truck), which is exactly the case
+     this exists to catch.
+   - **A following-distance governor** (**Avoid predicted collisions**,
+     on by default). Each step checks whether the vehicle's box at the
+     resulting position would overlap the ego or another vehicle at that
+     same instant, and brakes rather than accepting the overlap. Braking
+     and recovery are rate-limited (5.0 / 2.0 m/s², both under
+     validation's own 6.0 m/s² "unrealistic acceleration" threshold) so
+     the governor never trades a collision for a kinematic issue. It is a
+     governor, not a maneuver: a predicted vehicle only slows down or
+     recovers speed, never steers around a conflict. Where even a full
+     stop cannot open a gap, the prediction **truncates** — stopping
+     early is more honest than emitting an observation that puts two
+     vehicles in the same place.
+
    **Avoid predicted collisions** (checked by default) makes a predicted
    vehicle brake — down to a full stop if needed, never swerve — rather
    than driving straight through the ego or another vehicle's box; see
@@ -257,6 +297,26 @@ look for it.
 Scanned traces are registered *by reference* — nothing is copied or
 parsed until you actually open one, so scanning ~20,000 files takes well
 under a second.
+
+#### When a scan finds far fewer pairs than it should
+
+`tools/diagnose_scan.py` answers that in one run, against the real path,
+on the machine that holds the data:
+
+```bash
+python3 tools/diagnose_scan.py /path/to/corpus/root
+```
+
+It reads directory listings only — nothing is written or modified. It
+reports the top-level layout (flagging any branch that isn't readable),
+a brute-force ground-truth count of `adma.csv` and `*.xml` actually on
+disk, and then runs **both** the current matcher and the *original* one
+(plain `os.walk`, trace name = the file's immediate parent directory)
+side by side. That comparison is the point: if the two disagree, the
+regression is in this tool and the output says so. If they agree and
+both are low, the files aren't under the scanned root — or part of the
+tree isn't readable — and the per-subtree and unreadable-directory
+breakdowns say which.
 
 Type a path directly into the field, or click **Browse…** to navigate the
 filesystem *on the machine running the server* (the normal case for this

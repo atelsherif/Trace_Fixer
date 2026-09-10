@@ -219,3 +219,49 @@ def test_scan_does_not_hang_on_a_symlink_cycle(tmp_path):
 
     result = scan_for_trace_pairs(root)  # must return, not hang
     assert set(result.matched) == {"LB-VS-600_real"}
+
+
+def test_unreadable_directories_are_counted_not_silently_skipped(tmp_path, monkeypatch):
+    """A directory the walk can't open (permission denied, a stale/
+    unmounted network share) is the most likely reason a whole subtree
+    goes missing from a scan -- and both os.walk and this module's walker
+    skip one silently. It must at least be counted, with the OS's reason,
+    or "found far fewer files than this corpus contains" is unfalsifiable.
+    """
+    import os as os_module
+
+    from trace_fixer import scan as scan_module
+
+    _make_pair(tmp_path, "LB-VS-700_visible", "__refQC_IND.xml")
+    locked = tmp_path / "locked_subtree"
+    locked.mkdir()
+
+    real_scandir = os_module.scandir
+
+    def fake_scandir(path):
+        if str(path).endswith("locked_subtree"):
+            raise PermissionError(13, "Permission denied")
+        return real_scandir(path)
+
+    monkeypatch.setattr(scan_module.os, "scandir", fake_scandir)
+
+    result = scan_module.scan_for_trace_pairs(tmp_path)
+    # the readable half still scans -- one bad corner must not abort it
+    assert set(result.matched) == {"LB-VS-700_visible"}
+    assert result.dirs_unreadable == 1
+    assert len(result.unreadable_examples) == 1
+    assert "locked_subtree" in result.unreadable_examples[0]
+    assert "Permission denied" in result.unreadable_examples[0]
+    assert result.dirs_visited > 0
+
+
+def test_scan_reports_adma_counts_per_subtree(tmp_path):
+    """Which top-level branch the adma.csv files came from -- so a branch
+    that contributed nothing is visible without dumping every path."""
+    from trace_fixer.scan import scan_for_trace_pairs
+
+    _make_pair(tmp_path, "LB-VS-800_a", "__refQC_IND.xml")
+    _make_pair(tmp_path, "LB-VS-800_b", "__refQC_IND.xml")
+
+    result = scan_for_trace_pairs(tmp_path)
+    assert result.adma_files_by_subtree == {"adma": 2}

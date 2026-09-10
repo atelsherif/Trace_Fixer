@@ -1312,8 +1312,18 @@ function wireControls() {
       res.new_issue_count > 0
         ? ` Validation: ${res.before_issue_count} → ${res.after_issue_count} issue(s) (+${res.new_issue_count}).`
         : "";
+    // Why a track that looks predictable produced nothing backward: it's
+    // the far side of a tracking gap another track already explains.
+    const links = Object.entries(res.continuations || {});
+    const contNote = links.length
+      ? ` Same vehicle across a tracking gap: ${links
+          .map(([a, b]) => `veh ${a} → veh ${b}`)
+          .join(", ")} (only the earlier one predicts across it).`
+      : "";
     setStatus(
-      (perVehicle.length ? `Added predictions: ${perVehicle.join(", ")}.` : "No vehicles needed prediction.") + issueNote
+      (perVehicle.length ? `Added predictions: ${perVehicle.join(", ")}.` : "No vehicles needed prediction.") +
+        issueNote +
+        contNote
     );
   });
 
@@ -1432,6 +1442,26 @@ async function runScan() {
         `${data.xml_found} annotation file(s) — matched ${data.matched} pair(s). ` +
         `${data.total_traces} trace(s) now available.`,
     ];
+    if (data.dirs_unreadable) {
+      parts.push(
+        `⚠ ${data.dirs_unreadable} directory/directories could not be opened and were skipped — ` +
+          `anything inside them is missing from this scan:`
+      );
+      for (const eg of data.unreadable_examples || []) parts.push(`    ${eg}`);
+    }
+    const subtrees = Object.entries(data.adma_files_by_subtree || {});
+    if (subtrees.length) {
+      subtrees.sort((a, b) => b[1] - a[1]);
+      parts.push(
+        `adma.csv per top-level folder: ` + subtrees.map(([k, v]) => `${k}=${v}`).join(", ")
+      );
+    }
+    if (data.dirs_visited) {
+      const links = data.symlinked_dirs_followed
+        ? `, ${data.symlinked_dirs_followed} symlinked folder(s) followed`
+        : "";
+      parts.push(`Walked ${data.dirs_visited} directory/directories${links}.`);
+    }
     if (data.name_collisions) {
       parts.push(
         `${data.name_collisions} adma.csv file(s) shared a trace name with another and were skipped — ` +

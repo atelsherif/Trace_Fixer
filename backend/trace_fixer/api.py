@@ -32,7 +32,7 @@ from trace_fixer.export.openscenario import generate_openscenario
 from trace_fixer.export.report import generate_txt_report, generate_xml_report
 from trace_fixer.geo.populate import populate_global_coords
 from trace_fixer.geo.transform import latlon_to_local
-from trace_fixer.prediction.extrapolate import clear_predictions, predict_all
+from trace_fixer.prediction.extrapolate import clear_predictions, find_track_continuations, predict_all
 from trace_fixer.scene import build_scene_json
 from trace_fixer.store import TraceStore
 from trace_fixer.validation.checks import run_validation
@@ -135,6 +135,12 @@ class ScanResponse(BaseModel):
     adma_collision_examples: list[str] = []
     xml_duplicate_count: int = 0
     xml_duplicate_examples: list[str] = []
+    dirs_visited: int = 0
+    dirs_unreadable: int = 0
+    unreadable_examples: list[str] = []
+    symlinked_dirs_followed: int = 0
+    symlink_cycles_skipped: int = 0
+    adma_files_by_subtree: dict[str, int] = {}
 
 
 @app.post("/api/traces/scan", response_model=ScanResponse)
@@ -165,6 +171,12 @@ def scan_directory(req: ScanRequest):
         adma_collision_examples=result.adma_collision_examples,
         xml_duplicate_count=result.xml_duplicate_count,
         xml_duplicate_examples=result.xml_duplicate_examples,
+        dirs_visited=result.dirs_visited,
+        dirs_unreadable=result.dirs_unreadable,
+        unreadable_examples=result.unreadable_examples,
+        symlinked_dirs_followed=result.symlinked_dirs_followed,
+        symlink_cycles_skipped=result.symlink_cycles_skipped,
+        adma_files_by_subtree=result.adma_files_by_subtree,
     )
 
 
@@ -228,11 +240,15 @@ class PredictRequest(BaseModel):
     # prediction/extrapolate.py's _extrapolate). None = time only, the
     # original behavior.
     horizon_m: float | None = None
-    # The predicted vehicle brakes (down to a full stop) rather than
-    # driving through the ego or another vehicle's box -- see
-    # extrapolate.py's module docstring. Only disable this to compare
-    # against the older, collision-unaware behavior.
+    # The predicted vehicle brakes (and, where braking cannot open a gap,
+    # stops predicting) rather than driving through the ego or another
+    # vehicle's box -- see extrapolate.py's module docstring. Only disable
+    # this to compare against the older, collision-unaware behavior.
     avoid_collisions: bool = True
+    # Treat two tracks that are the same physical vehicle either side of an
+    # annotation tracking gap as one, so only the earlier predicts across
+    # the gap. Without it the vehicle collides with its own second id.
+    link_continuations: bool = True
     # When true, predicts and validates on a throwaway copy of the trace
     # and reports what issues the prediction *would* introduce without
     # actually adding it -- lets a caller check before committing a
@@ -271,6 +287,7 @@ def predict(trace_id: str, req: PredictRequest = PredictRequest()):
     predict_kwargs = dict(
         horizon_s=req.horizon_s, step_s=req.step_s, backward=req.backward, forward=req.forward,
         horizon_m=req.horizon_m, avoid_collisions=req.avoid_collisions,
+        link_continuations=req.link_continuations,
     )
 
     if req.preview:
@@ -289,6 +306,7 @@ def predict(trace_id: str, req: PredictRequest = PredictRequest()):
             "new_issue_count": max(0, after_issue_count - before_issue_count),
         }
 
+    continuations = find_track_continuations(trace) if req.link_continuations else {}
     before_issue_count = len(run_validation(trace))
     added = predict_all(trace, **predict_kwargs)
     after_issue_count = len(run_validation(trace))
@@ -298,6 +316,10 @@ def predict(trace_id: str, req: PredictRequest = PredictRequest()):
         "before_issue_count": before_issue_count,
         "after_issue_count": after_issue_count,
         "new_issue_count": max(0, after_issue_count - before_issue_count),
+        # {predecessor_id: successor_id} -- worth surfacing, since it
+        # explains why a track that looks like it should have been
+        # predicted backward wasn't.
+        "continuations": {str(k): v for k, v in continuations.items()},
     }
 
 
@@ -323,6 +345,7 @@ def _fix_predict_and_write_output(trace_id: str, opts: FixExportOptions) -> dict
         predict_all(
             trace, horizon_s=opts.horizon_s, step_s=opts.step_s, backward=opts.backward, forward=opts.forward,
             horizon_m=opts.horizon_m, avoid_collisions=opts.avoid_collisions,
+            link_continuations=opts.link_continuations,
         )
         if opts.predict_trajectories
         else {}

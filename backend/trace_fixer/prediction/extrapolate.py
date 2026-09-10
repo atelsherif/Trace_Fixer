@@ -13,17 +13,28 @@ intentionally a simple, explainable model -- there's no ground truth for
 what a vehicle did while unobserved, so the goal is "a plausible,
 road-following continuation", not a precise reconstruction.
 
-Predictions are still generated per-vehicle, one track at a time, but
-(unless `avoid_collisions=False`) each step checks whether the vehicle's
-box at the resulting position would overlap the ego or another vehicle's
-box at that same instant and, if so, brakes instead of accepting the
-overlap -- a simple following-distance governor, not a maneuver: a
-predicted vehicle only ever slows down (down to a full stop) or recovers
-speed once clear, it never changes heading to steer around a conflict.
-Only vehicles already predicted *earlier* in the same `predict_all` call
-are visible to a later one -- see `_ConflictBoxFinder` -- so this reduces
-but does not guarantee zero overlaps; whatever it doesn't catch is still
-surfaced by validation rather than silently resolved.
+Two things keep the result from contradicting the rest of the scene:
+
+**Track continuations.** An annotation that loses a vehicle and re-acquires
+it a second later gives it a *new* object id, so one physical vehicle
+arrives as two tracks with a gap between them. Extrapolating the first
+forward and the second backward then fills that gap with two ghosts of
+the same vehicle, in the same lane, at the same time -- which validation
+correctly reports as a collision. `find_track_continuations` spots those
+pairs (see its docstring for the test) and lets only the earlier track
+predict across the gap, so there is one ghost there, not two. On the
+bundled sample1 this alone accounts for every collision the predictor
+used to introduce.
+
+**A following-distance governor.** Otherwise (unless
+`avoid_collisions=False`) each step checks whether the vehicle's box at
+the resulting position would overlap the ego or another vehicle's box at
+that same instant and, if so, brakes instead of accepting the overlap.
+It is a governor, not a maneuver: a predicted vehicle only ever slows
+down (to a full stop) or recovers speed once clear, and never changes
+heading to steer around a conflict. A conflict closing faster than
+realistic braking can resolve therefore still surfaces as a collision --
+the honest outcome for a speed-only model, not something to paper over.
 """
 from __future__ import annotations
 
@@ -203,14 +214,28 @@ def _extrapolate(
             return x + direction * math.cos(heading) * v * step_s, y + direction * math.sin(heading) * v * step_s
 
         if conflicts is not None:
+            boxes = conflicts.boxes_at(t_cursor)
+            grown_length = anchor.length + 2 * COLLISION_SAFETY_MARGIN_M
+            grown_width = anchor.width + 2 * COLLISION_SAFETY_MARGIN_M
+
+            def _blocked(px: float, py: float, length: float, width: float) -> bool:
+                return any(
+                    obb_overlap(px, py, math.degrees(heading), length, width, *box) for box in boxes
+                )
+
             cand_x, cand_y = _step_to(current_speed)
-            grown_length, grown_width = anchor.length + 2 * COLLISION_SAFETY_MARGIN_M, anchor.width + 2 * COLLISION_SAFETY_MARGIN_M
-            if any(
-                obb_overlap(cand_x, cand_y, math.degrees(heading), grown_length, grown_width, *box)
-                for box in conflicts.boxes_at(t_cursor)
-            ):
+            if _blocked(cand_x, cand_y, grown_length, grown_width):
                 current_speed = max(0.0, current_speed - COLLISION_BRAKE_MPS2 * step_s)
                 cand_x, cand_y = _step_to(current_speed)
+                # Braking is rate-limited to stay physically plausible, so
+                # it cannot always open a gap in one step. If the vehicle's
+                # *actual* box (not the safety-margin one) would still
+                # overlap even after braking, the honest answer is that
+                # there is no plausible continuation from here -- stop
+                # predicting rather than emit an observation known to put
+                # two vehicles in the same place.
+                if _blocked(cand_x, cand_y, anchor.length, anchor.width):
+                    break
             else:
                 current_speed = min(speed, current_speed + COLLISION_RECOVERY_MPS2 * step_s)
             x, y = cand_x, cand_y
@@ -250,6 +275,82 @@ def _extrapolate(
     return synthetic
 
 
+# --- Track continuation detection -------------------------------------
+# Thresholds for "these two tracks are the same physical vehicle, the
+# annotation just lost it for a moment". Deliberately all-or-nothing: a
+# false positive suppresses a legitimate prediction, so every test below
+# must pass. Measured against the bundled samples, real continuations and
+# coincidental neighbours separate by an enormous margin on every one of
+# them -- the real pairs bridge their gap at within 3 m/s of the speed
+# actually observed on both sides, while the nearest false candidate would
+# need 124 m/s (450 km/h) to be the same vehicle.
+MAX_CONTINUATION_GAP_S = 3.0
+MAX_CONTINUATION_BRIDGE_SPEED_ERROR_MPS = 8.0
+MAX_CONTINUATION_LATERAL_M = 2.0
+MAX_CONTINUATION_WIDTH_DIFF_M = 0.6
+
+
+def _speed_between(a: VehicleObs, b: VehicleObs) -> float:
+    dt = abs(b.t_us - a.t_us) / 1e6
+    return math.hypot(b.x_m - a.x_m, b.y_m - a.y_m) / dt if dt else 0.0
+
+
+def find_track_continuations(trace: Trace) -> dict[int, int]:
+    """Maps predecessor track id -> successor track id for tracks that are
+    the same physical vehicle split across an annotation tracking gap.
+
+    A pair qualifies only if *all* of these hold, which is what keeps a
+    genuinely different vehicle in the neighbouring lane from being
+    absorbed: the successor starts after the predecessor ends, within
+    MAX_CONTINUATION_GAP_S; the straight-line speed needed to bridge the
+    gap matches the speed actually observed at both ends; both ends carry
+    the same `obj_lane` label and sit within MAX_CONTINUATION_LATERAL_M of
+    each other laterally; and the two agree on object type and width.
+
+    Length is deliberately *not* compared: a truck half-occluded on first
+    acquisition is measured short and then re-measured at full length once
+    clear, which is exactly the case this exists to catch (14.0m then
+    21.6m for the same truck, on the bundled sample1).
+    """
+    real_by_id: dict[int, list[VehicleObs]] = {}
+    for obj_id, track in trace.annotation.vehicles.items():
+        obs = [o for o in track.observations if not o.synthetic]
+        if len(obs) >= 2:
+            real_by_id[obj_id] = obs
+
+    continuations: dict[int, int] = {}
+    claimed_successors: set[int] = set()
+    for a_id, a_obs in real_by_id.items():
+        a_end = a_obs[-1]
+        best: tuple[float, int] | None = None
+        for b_id, b_obs in real_by_id.items():
+            if b_id == a_id or b_id in claimed_successors:
+                continue
+            b_start = b_obs[0]
+            gap_s = (b_start.t_us - a_end.t_us) / 1e6
+            if not (0 < gap_s <= MAX_CONTINUATION_GAP_S):
+                continue
+            if a_end.obj_lane != b_start.obj_lane:
+                continue
+            if abs(b_start.y_rel - a_end.y_rel) > MAX_CONTINUATION_LATERAL_M:
+                continue
+            if abs(b_start.width - a_end.width) > MAX_CONTINUATION_WIDTH_DIFF_M:
+                continue
+            if trace.annotation.vehicles[a_id].obj_type != trace.annotation.vehicles[b_id].obj_type:
+                continue
+            observed = (_speed_between(a_obs[-2], a_end) + _speed_between(b_start, b_obs[1])) / 2
+            bridge = _speed_between(a_end, b_start)
+            error = abs(bridge - observed)
+            if error > MAX_CONTINUATION_BRIDGE_SPEED_ERROR_MPS:
+                continue
+            if best is None or error < best[0]:
+                best = (error, b_id)
+        if best is not None:
+            continuations[a_id] = best[1]
+            claimed_successors.add(best[1])
+    return continuations
+
+
 def _total_frames(trace: Trace) -> int | None:
     if not trace.annotation.frame_meta:
         return None
@@ -263,6 +364,7 @@ def predict_backward(
     step_s: float = DEFAULT_STEP_S,
     horizon_m: float | None = None,
     avoid_collisions: bool = True,
+    time_bound_us: int | None = None,
 ) -> int:
     """Prepends synthetic observations before the track's first real one
     (pre-FOV: the vehicle was already moving when first observed). Returns
@@ -291,7 +393,8 @@ def predict_backward(
     conflicts = _ConflictBoxFinder(trace, interp, track.obj_id) if avoid_collisions else None
     synthetic = _extrapolate(
         first, trace, interp, speed, heading, direction=-1,
-        horizon_s=_effective_horizon(first, horizon_s), step_s=step_s, time_bound_us=trace.ego.t0_us,
+        horizon_s=_effective_horizon(first, horizon_s), step_s=step_s,
+        time_bound_us=max(trace.ego.t0_us, time_bound_us) if time_bound_us is not None else trace.ego.t0_us,
         horizon_m=_effective_horizon(first, horizon_m), conflicts=conflicts,
     )
     synthetic.reverse()
@@ -306,6 +409,7 @@ def predict_forward(
     step_s: float = DEFAULT_STEP_S,
     horizon_m: float | None = None,
     avoid_collisions: bool = True,
+    time_bound_us: int | None = None,
 ) -> int:
     """Appends synthetic observations after the track's last real one
     (post-FOV: the vehicle dropped out of the front-facing cone -- overtaken
@@ -330,7 +434,8 @@ def predict_forward(
     conflicts = _ConflictBoxFinder(trace, interp, track.obj_id) if avoid_collisions else None
     synthetic = _extrapolate(
         last, trace, interp, speed, heading, direction=1,
-        horizon_s=_effective_horizon(last, horizon_s), step_s=step_s, time_bound_us=trace.ego.t1_us,
+        horizon_s=_effective_horizon(last, horizon_s), step_s=step_s,
+        time_bound_us=min(trace.ego.t1_us, time_bound_us) if time_bound_us is not None else trace.ego.t1_us,
         horizon_m=_effective_horizon(last, horizon_m), conflicts=conflicts,
     )
     track.observations = [o for o in track.observations if not (o.synthetic and o.t_us > last.t_us)] + synthetic
@@ -345,38 +450,65 @@ def predict_all(
     forward: bool = True,
     horizon_m: float | None = None,
     avoid_collisions: bool = True,
+    link_continuations: bool = True,
 ) -> dict[int, dict[str, int]]:
-    """Predicts every vehicle's missing segments. When `avoid_collisions`
-    is set, this runs two passes rather than one: a first, ungoverned pass
-    gives every vehicle *some* full-length predicted path, so the second,
-    governed pass's `_ConflictBoxFinder` has real data for every other
-    vehicle to react to -- not just whichever ones happened to be
-    processed earlier in a single pass (predict_backward/predict_forward
-    only ever see tracks already handled earlier in the same call). The
-    second pass's own results replace the first's on every track.
-    """
-    if avoid_collisions:
-        for track in trace.annotation.vehicles.values():
-            if backward:
-                predict_backward(track, trace, horizon_s=horizon_s, step_s=step_s, horizon_m=horizon_m, avoid_collisions=False)
-            if forward:
-                predict_forward(track, trace, horizon_s=horizon_s, step_s=step_s, horizon_m=horizon_m, avoid_collisions=False)
+    """Predicts every vehicle's missing segments.
 
-    added: dict[int, dict[str, int]] = {}
-    for track in trace.annotation.vehicles.values():
-        entry = {}
-        if backward:
+    `link_continuations` first identifies tracks that are the same
+    physical vehicle either side of an annotation tracking gap (see
+    `find_track_continuations`). For such a pair, only the earlier track
+    predicts across the gap -- bounded so it stops where the later track
+    picks up -- and the later track skips its backward prediction
+    entirely. Without this, both fill the same gap and the vehicle
+    collides with itself.
+
+    When `avoid_collisions` is set, this runs two passes rather than one:
+    a first, ungoverned pass gives every vehicle *some* full-length
+    predicted path, so the second, governed pass's `_ConflictBoxFinder`
+    has real data for every other vehicle to react to -- not just
+    whichever ones happened to be processed earlier in a single pass
+    (predict_backward/predict_forward only ever see tracks already
+    handled earlier in the same call). The second pass's own results
+    replace the first's on every track.
+    """
+    continuations = find_track_continuations(trace) if link_continuations else {}
+    successors = set(continuations.values())
+
+    def _forward_bound(track: VehicleTrack) -> int | None:
+        """Stop a predecessor's forward prediction where its successor's
+        own real observations begin -- past that point the vehicle is not
+        missing, it's just wearing a different id."""
+        successor_id = continuations.get(track.obj_id)
+        if successor_id is None:
+            return None
+        successor_obs = [o for o in trace.annotation.vehicles[successor_id].observations if not o.synthetic]
+        return successor_obs[0].t_us if successor_obs else None
+
+    def _run(track: VehicleTrack, governed: bool) -> dict[str, int]:
+        entry: dict[str, int] = {}
+        if backward and track.obj_id not in successors:
             n = predict_backward(
-                track, trace, horizon_s=horizon_s, step_s=step_s, horizon_m=horizon_m, avoid_collisions=avoid_collisions
+                track, trace, horizon_s=horizon_s, step_s=step_s, horizon_m=horizon_m,
+                avoid_collisions=governed,
             )
             if n:
                 entry["backward"] = n
         if forward:
             n = predict_forward(
-                track, trace, horizon_s=horizon_s, step_s=step_s, horizon_m=horizon_m, avoid_collisions=avoid_collisions
+                track, trace, horizon_s=horizon_s, step_s=step_s, horizon_m=horizon_m,
+                avoid_collisions=governed, time_bound_us=_forward_bound(track),
             )
             if n:
                 entry["forward"] = n
+        return entry
+
+    if avoid_collisions:
+        for track in trace.annotation.vehicles.values():
+            _run(track, governed=False)
+
+    added: dict[int, dict[str, int]] = {}
+    for track in trace.annotation.vehicles.values():
+        entry = _run(track, governed=avoid_collisions)
         if entry:
             added[track.obj_id] = entry
     return added

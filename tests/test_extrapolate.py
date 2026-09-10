@@ -148,12 +148,109 @@ def test_avoid_collisions_brakes_instead_of_driving_through_a_stationary_vehicle
     predict_forward(unguarded_track, trace_unguarded, horizon_s=10.0, step_s=DEFAULT_STEP_S, avoid_collisions=False)
 
     guarded_synth = [o for o in guarded_track.observations if o.synthetic]
+    unguarded_synth = [o for o in unguarded_track.observations if o.synthetic]
     guarded_max_x = max(o.x_m for o in guarded_synth)
-    unguarded_max_x = max(o.x_m for o in unguarded_track.observations if o.synthetic)
-    # Unguarded drives straight through the obstacle at x=200; guarded
-    # brakes well short of driving through it, then holds position
-    # (its last few steps are identical -- it came to a full stop).
+    unguarded_max_x = max(o.x_m for o in unguarded_synth)
+
+    # Unguarded drives straight through the obstacle parked at x=200.
     assert unguarded_max_x > 220.0
-    assert guarded_max_x < 210.0
-    assert guarded_max_x < unguarded_max_x
-    assert {o.x_m for o in guarded_synth[-5:]} == {guarded_max_x}
+    # Guarded brakes and stops short of it...
+    assert guarded_max_x < 200.0
+    # ...and truncates rather than emitting a stationary ghost sitting in
+    # the obstacle for every remaining step: braking is rate-limited, so
+    # once even a full stop can't open a gap there is no plausible
+    # continuation left to predict.
+    assert len(guarded_synth) < len(unguarded_synth)
+    step_distances = [
+        abs(b.x_m - a.x_m) for a, b in zip(guarded_synth, guarded_synth[1:])
+    ]
+    assert all(d > 0.01 for d in step_distances), "should truncate, not park in place"
+
+
+# --- Track continuation detection -------------------------------------
+
+def _track(obj_id, obj_type, obs):
+    return VehicleTrack(obj_id=obj_id, obj_type=obj_type, reflecting_parts=None, observations=obs)
+
+
+def _moving_obs(t_s, frame, x_m, *, y_rel=-3.8, width=2.8, lane="1st Right", length=14.0):
+    o = _obs(t_s, frame, x_rel=100.0, x_m=x_m)
+    o.y_rel, o.width, o.obj_lane, o.length = y_rel, width, lane, length
+    return o
+
+
+def _continuation_trace(**second_track_overrides):
+    """One truck observed 0-8s, then re-acquired as a new id 9.3-12s after
+    a 1.3s tracking gap -- the shape of the real case on sample1."""
+    ego = _ego_trace()
+    first = _track(3, "Truck", [_moving_obs(t, 100 + i, 200.0 + 30.0 * t) for i, t in enumerate([7.0, 8.0])])
+    second = _track(
+        4,
+        second_track_overrides.pop("obj_type", "Truck"),
+        [_moving_obs(t, 200 + i, 200.0 + 30.0 * t, **second_track_overrides) for i, t in enumerate([9.3, 10.3])],
+    )
+    trace = Trace(
+        trace_id="t", ego=ego,
+        annotation=Annotation(country_code=None, vehicles={3: first, 4: second}),
+    )
+    return trace
+
+
+def test_continuation_is_detected_across_a_tracking_gap():
+    """The real sample1 case: one truck, two ids, a 1.3s gap. Same lane,
+    same lateral offset, same width, and a gap bridged at exactly the
+    speed both ends were observed travelling."""
+    from trace_fixer.prediction.extrapolate import find_track_continuations
+
+    assert find_track_continuations(_continuation_trace()) == {3: 4}
+
+
+def test_a_different_vehicle_is_not_absorbed_as_a_continuation():
+    """Each criterion on its own must be able to veto the match --
+    otherwise a genuinely separate vehicle's prediction gets suppressed."""
+    from trace_fixer.prediction.extrapolate import find_track_continuations
+
+    assert find_track_continuations(_continuation_trace(lane="EGO lane")) == {}, "different lane"
+    assert find_track_continuations(_continuation_trace(y_rel=3.9)) == {}, "different lateral offset"
+    assert find_track_continuations(_continuation_trace(width=1.8)) == {}, "different width"
+    assert find_track_continuations(_continuation_trace(obj_type="Car")) == {}, "different object type"
+
+
+def test_a_gap_no_speed_could_bridge_is_not_a_continuation():
+    """The dominant real-world discriminator: a coincidental neighbour
+    would have to travel at hundreds of km/h to be the same vehicle."""
+    from trace_fixer.prediction.extrapolate import find_track_continuations
+
+    trace = _continuation_trace()
+    # move the successor 200m further along -- same lane, same size, but it
+    # would need ~150 m/s to have got there
+    for o in trace.annotation.vehicles[4].observations:
+        o.x_m += 200.0
+    assert find_track_continuations(trace) == {}
+
+
+def test_only_the_earlier_track_predicts_across_a_continuation_gap():
+    """The point of detecting continuations: two ghosts of one vehicle in
+    the same gap is what validation reports as a collision."""
+    from trace_fixer.prediction.extrapolate import predict_all
+
+    trace = _continuation_trace()
+    added = predict_all(trace, horizon_s=4.0)
+
+    # the successor must not predict backward into the gap its predecessor
+    # already explains
+    assert "backward" not in added.get(4, {})
+    # ...and the predecessor's forward prediction stops where the
+    # successor's own real observations begin
+    predecessor_synthetic = [o for o in trace.annotation.vehicles[3].observations if o.synthetic]
+    successor_first = trace.annotation.vehicles[4].observations[0]
+    assert predecessor_synthetic
+    assert max(o.t_us for o in predecessor_synthetic) <= successor_first.t_us
+
+
+def test_link_continuations_can_be_turned_off():
+    from trace_fixer.prediction.extrapolate import predict_all
+
+    trace = _continuation_trace()
+    added = predict_all(trace, horizon_s=4.0, link_continuations=False)
+    assert "backward" in added.get(4, {})

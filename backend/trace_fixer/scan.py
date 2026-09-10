@@ -74,6 +74,22 @@ class ScanResult:
     adma_collision_examples: list[str] = field(default_factory=list)
     xml_duplicate_count: int = 0
     xml_duplicate_examples: list[str] = field(default_factory=list)
+    # Traversal facts, so "the scan found far fewer files than this corpus
+    # obviously contains" is answerable instead of a mystery. A directory
+    # the walk could not open (permission denied, a stale/unmounted network
+    # share, a broken symlink) is the single most likely reason for a
+    # subtree to go missing, and both os.walk and this module's own walker
+    # skip such a directory *silently* by default -- no error, no partial
+    # result, just fewer files. Counting them (with the OS's own reason)
+    # turns that into something you can actually see.
+    dirs_visited: int = 0
+    dirs_unreadable: int = 0
+    unreadable_examples: list[str] = field(default_factory=list)
+    symlinked_dirs_followed: int = 0
+    symlink_cycles_skipped: int = 0
+    # adma.csv counts per top-level subdirectory of the scan root, so a
+    # subtree that contributed nothing stands out immediately.
+    adma_files_by_subtree: dict[str, int] = field(default_factory=dict)
 
 
 def _strip_known_suffix(stem: str) -> str:
@@ -94,7 +110,16 @@ def _trace_name_for_adma(adma_path: Path, root: Path) -> str:
     return adma_path.parent.name
 
 
-def _walk_following_symlinks(root: Path):
+@dataclass
+class WalkStats:
+    dirs_visited: int = 0
+    dirs_unreadable: int = 0
+    unreadable_examples: list[str] = field(default_factory=list)
+    symlinked_dirs_followed: int = 0
+    symlink_cycles_skipped: int = 0
+
+
+def _walk_following_symlinks(root: Path, stats: "WalkStats | None" = None):
     """Like os.walk, but descends into symlinked subdirectories -- large
     real corpora are routinely organized with symlinks (a shared-storage
     mount, a dedup/reprocessing layer, a "latest" pointer tree), and
@@ -102,8 +127,12 @@ def _walk_following_symlinks(root: Path):
     warn it can recurse forever if a link points back at one of its own
     ancestors, since it "does not keep track of the directories it has
     already visited." This does, by realpath, so a symlink cycle is
-    silently skipped (its second visit, not its first) rather than
-    hanging the scan.
+    skipped (on its second visit, not its first) rather than hanging.
+
+    Records into `stats` what it could and couldn't traverse. A directory
+    that fails to open is still skipped -- one unreadable corner must not
+    abort a 20,000-file scan -- but it is *counted*, with the OS's own
+    reason, rather than vanishing silently the way os.walk drops it.
     """
     visited: set[str] = set()
     stack = [root]
@@ -111,19 +140,33 @@ def _walk_following_symlinks(root: Path):
         current = stack.pop()
         real = os.path.realpath(current)
         if real in visited:
+            if stats is not None:
+                stats.symlink_cycles_skipped += 1
             continue
         visited.add(real)
         try:
             entries = list(os.scandir(current))
-        except OSError:
+        except OSError as exc:
+            if stats is not None:
+                stats.dirs_unreadable += 1
+                if len(stats.unreadable_examples) < _MAX_UNMATCHED_EXAMPLES:
+                    stats.unreadable_examples.append(f"{current} ({exc.strerror or exc})")
             continue
+        if stats is not None:
+            stats.dirs_visited += 1
         filenames = []
         for entry in entries:
             try:
                 is_dir = entry.is_dir(follow_symlinks=True)
-            except OSError:
+            except OSError as exc:
+                if stats is not None:
+                    stats.dirs_unreadable += 1
+                    if len(stats.unreadable_examples) < _MAX_UNMATCHED_EXAMPLES:
+                        stats.unreadable_examples.append(f"{entry.path} ({exc.strerror or exc})")
                 continue
             if is_dir:
+                if stats is not None and entry.is_symlink():
+                    stats.symlinked_dirs_followed += 1
                 stack.append(Path(entry.path))
             else:
                 filenames.append(entry.name)
@@ -140,13 +183,27 @@ def scan_for_trace_pairs(root: Path) -> ScanResult:
     adma_files_found = 0
     name_collisions = 0
     adma_collision_examples: list[str] = []
+    stats = WalkStats()
+    adma_files_by_subtree: dict[str, int] = {}
 
-    for dirpath, filenames in _walk_following_symlinks(root):
+    def _subtree_of(path: Path) -> str:
+        """Which top-level child of the scan root a file sits under -- the
+        granularity at which "this whole branch contributed nothing" is
+        visible without dumping thousands of paths."""
+        try:
+            rel = path.relative_to(root)
+        except ValueError:
+            return "<outside root>"
+        return rel.parts[0] if len(rel.parts) > 1 else "."
+
+    for dirpath, filenames in _walk_following_symlinks(root, stats):
         for fname in filenames:
             lower = fname.lower()
             if lower == ADMA_FILENAME:
                 adma_path = Path(dirpath) / fname
                 adma_files_found += 1
+                subtree = _subtree_of(adma_path)
+                adma_files_by_subtree[subtree] = adma_files_by_subtree.get(subtree, 0) + 1
                 trace_name = _trace_name_for_adma(adma_path, root)
                 if trace_name in adma_by_name:
                     name_collisions += 1
@@ -210,4 +267,10 @@ def scan_for_trace_pairs(root: Path) -> ScanResult:
         adma_collision_examples=adma_collision_examples,
         xml_duplicate_count=xml_duplicate_count,
         xml_duplicate_examples=xml_duplicate_examples,
+        dirs_visited=stats.dirs_visited,
+        dirs_unreadable=stats.dirs_unreadable,
+        unreadable_examples=stats.unreadable_examples,
+        symlinked_dirs_followed=stats.symlinked_dirs_followed,
+        symlink_cycles_skipped=stats.symlink_cycles_skipped,
+        adma_files_by_subtree=adma_files_by_subtree,
     )
