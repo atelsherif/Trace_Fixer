@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import threading
 from pathlib import Path
@@ -131,6 +132,9 @@ class ScanResponse(BaseModel):
     name_collisions: int = 0
     unmatched_adma_examples: list[str] = []
     unmatched_xml_examples: list[str] = []
+    adma_collision_examples: list[str] = []
+    xml_duplicate_count: int = 0
+    xml_duplicate_examples: list[str] = []
 
 
 @app.post("/api/traces/scan", response_model=ScanResponse)
@@ -158,6 +162,9 @@ def scan_directory(req: ScanRequest):
         name_collisions=result.name_collisions,
         unmatched_adma_examples=result.unmatched_adma_examples,
         unmatched_xml_examples=result.unmatched_xml_examples,
+        adma_collision_examples=result.adma_collision_examples,
+        xml_duplicate_count=result.xml_duplicate_count,
+        xml_duplicate_examples=result.xml_duplicate_examples,
     )
 
 
@@ -216,6 +223,13 @@ class PredictRequest(BaseModel):
     step_s: float = 0.2
     backward: bool = True
     forward: bool = True
+    # When true, predicts and validates on a throwaway copy of the trace
+    # and reports what issues the prediction *would* introduce without
+    # actually adding it -- lets the GUI warn before committing a
+    # prediction that turns out to create new validation issues (an
+    # unrealistic extrapolation clipping through another vehicle, running
+    # off the road, etc.) instead of finding out only after the fact.
+    preview: bool = False
 
 
 class FixExportOptions(PredictRequest):
@@ -244,6 +258,25 @@ class FixExportOptions(PredictRequest):
 @app.post("/api/traces/{trace_id}/predict")
 def predict(trace_id: str, req: PredictRequest = PredictRequest()):
     trace = _get_trace_or_404(trace_id)
+
+    if req.preview:
+        # A throwaway copy: predict_backward/predict_forward reassign
+        # track.observations wholesale, but the VehicleTrack objects
+        # themselves are shared unless deep-copied, so a shallow copy
+        # would still mutate the live trace's tracks in place.
+        before_issue_count = len(run_validation(trace))
+        preview_trace = copy.deepcopy(trace)
+        added = predict_all(
+            preview_trace, horizon_s=req.horizon_s, step_s=req.step_s, backward=req.backward, forward=req.forward
+        )
+        after_issue_count = len(run_validation(preview_trace))
+        return {
+            "added": added,
+            "before_issue_count": before_issue_count,
+            "after_issue_count": after_issue_count,
+            "new_issue_count": max(0, after_issue_count - before_issue_count),
+        }
+
     added = predict_all(
         trace, horizon_s=req.horizon_s, step_s=req.step_s, backward=req.backward, forward=req.forward
     )

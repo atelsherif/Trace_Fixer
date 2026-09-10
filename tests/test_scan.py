@@ -160,3 +160,28 @@ def test_colliding_trace_names_are_counted_not_silently_dropped(tmp_path):
     assert result.adma_files_found == 2
     assert result.adma_found == 1
     assert result.name_collisions == 1
+    assert len(result.adma_collision_examples) == 1
+    assert "run1" in result.adma_collision_examples[0] or "run2" in result.adma_collision_examples[0]
+
+
+def test_duplicate_annotation_for_an_already_matched_trace_is_reported_not_silent(tmp_path):
+    """A second annotation file resolving to a trace name a first one
+    already claimed is a real match, just not the winning one -- distinct
+    from 'unmatched' (it never fails to resolve a trace name at all) and,
+    before xml_duplicate_count existed, invisible in every diagnostic."""
+    from trace_fixer.scan import scan_for_trace_pairs
+
+    d = tmp_path / "SameName"
+    d.mkdir()
+    (d / "adma.csv").write_text("x")
+    (tmp_path / "SameName__refQC_IND.xml").write_text("x")
+    (tmp_path / "reprocessed" / "SameName__refQC_IND.xml").parent.mkdir()
+    (tmp_path / "reprocessed" / "SameName__refQC_IND.xml").write_text("x")
+
+    result = scan_for_trace_pairs(tmp_path)
+    assert set(result.matched) == {"SameName"}
+    assert result.xml_duplicate_count == 1
+    assert len(result.xml_duplicate_examples) == 1
+    assert "reprocessed" in result.xml_duplicate_examples[0]
+    # the duplicate is a real match, so it must not also inflate unmatched_xml_count
+    assert result.unmatched_xml_count == 0

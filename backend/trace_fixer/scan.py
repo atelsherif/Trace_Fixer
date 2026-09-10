@@ -23,8 +23,12 @@ Matching strategy:
      known trace names (handles suffix spellings we haven't seen yet).
 
 `ScanResult` reports raw file counts alongside the matched pairs, plus a
-sample of what didn't match, so a corpus that scans to a surprisingly low
-number can be diagnosed from the GUI instead of guessed at.
+sample of what didn't match *and* a sample of what matched but was
+discarded as a duplicate (a second `adma.csv` or annotation file resolving
+to a trace name already claimed -- e.g. a reprocessed/re-exported copy
+living alongside the original elsewhere in the corpus), so a corpus that
+scans to a surprisingly low number can be diagnosed from the GUI instead
+of guessed at.
 """
 from __future__ import annotations
 
@@ -57,6 +61,16 @@ class ScanResult:
     name_collisions: int = 0  # adma.csv files sharing a derived trace name
     unmatched_adma_examples: list[str] = field(default_factory=list)
     unmatched_xml_examples: list[str] = field(default_factory=list)
+    # A second adma.csv/annotation resolving to a trace name a *first* one
+    # already claimed -- e.g. a duplicate export of the same trace living
+    # under a different subtree -- silently dropped the same way a
+    # collision is, but (unlike unmatched_*) it never shows up any other
+    # way: the file has a perfectly good match, it's just not the one that
+    # won. Each example names both the dropped path and the path that won
+    # the slot, so a specific missing pair can be traced to its duplicate.
+    adma_collision_examples: list[str] = field(default_factory=list)
+    xml_duplicate_count: int = 0
+    xml_duplicate_examples: list[str] = field(default_factory=list)
 
 
 def _strip_known_suffix(stem: str) -> str:
@@ -86,6 +100,7 @@ def scan_for_trace_pairs(root: Path) -> ScanResult:
     xml_files: list[tuple[str, Path]] = []
     adma_files_found = 0
     name_collisions = 0
+    adma_collision_examples: list[str] = []
 
     for dirpath, _dirnames, filenames in os.walk(root):
         for fname in filenames:
@@ -96,6 +111,10 @@ def scan_for_trace_pairs(root: Path) -> ScanResult:
                 trace_name = _trace_name_for_adma(adma_path, root)
                 if trace_name in adma_by_name:
                     name_collisions += 1
+                    if len(adma_collision_examples) < _MAX_UNMATCHED_EXAMPLES:
+                        adma_collision_examples.append(
+                            f"{adma_path} (dropped; trace name '{trace_name}' already claimed by {adma_by_name[trace_name]})"
+                        )
                 else:
                     adma_by_name[trace_name] = adma_path
             elif lower.endswith(".xml"):
@@ -106,6 +125,9 @@ def scan_for_trace_pairs(root: Path) -> ScanResult:
 
     matched: dict[str, tuple[Path, Path]] = {}
     unmatched_xml_examples: list[str] = []
+    xml_duplicate_count = 0
+    xml_duplicate_examples: list[str] = []
+    unmatched_xml_count = 0
 
     for stem, xml_path in xml_files:
         stripped = _strip_known_suffix(stem)
@@ -119,11 +141,21 @@ def scan_for_trace_pairs(root: Path) -> ScanResult:
                     trace_name = candidate
                     break
 
-        if trace_name is not None and trace_name not in matched:
-            matched[trace_name] = (adma_by_name[trace_name], xml_path)
-        elif trace_name is None:
+        if trace_name is None:
+            unmatched_xml_count += 1
             if len(unmatched_xml_examples) < _MAX_UNMATCHED_EXAMPLES:
                 unmatched_xml_examples.append(xml_path.name)
+        elif trace_name not in matched:
+            matched[trace_name] = (adma_by_name[trace_name], xml_path)
+        else:
+            # A real match, just not the first one -- e.g. a duplicate/
+            # reprocessed annotation export for a trace already claimed.
+            # Never surfaced any other way, since it's not "unmatched".
+            xml_duplicate_count += 1
+            if len(xml_duplicate_examples) < _MAX_UNMATCHED_EXAMPLES:
+                xml_duplicate_examples.append(
+                    f"{xml_path} (dropped; trace name '{trace_name}' already claimed by {matched[trace_name][1]})"
+                )
 
     unmatched_adma = [name for name in sorted_names if name not in matched]
     return ScanResult(
@@ -131,9 +163,12 @@ def scan_for_trace_pairs(root: Path) -> ScanResult:
         adma_found=len(adma_by_name),
         xml_found=len(xml_files),
         unmatched_adma_count=len(unmatched_adma),
-        unmatched_xml_count=sum(1 for stem, _ in xml_files if _strip_known_suffix(stem) not in matched),
+        unmatched_xml_count=unmatched_xml_count,
         adma_files_found=adma_files_found,
         name_collisions=name_collisions,
         unmatched_adma_examples=unmatched_adma[:_MAX_UNMATCHED_EXAMPLES],
         unmatched_xml_examples=unmatched_xml_examples,
+        adma_collision_examples=adma_collision_examples,
+        xml_duplicate_count=xml_duplicate_count,
+        xml_duplicate_examples=xml_duplicate_examples,
     )

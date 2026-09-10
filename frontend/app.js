@@ -1291,14 +1291,32 @@ function wireControls() {
   });
 
   el("btn-predict").addEventListener("click", async () => {
+    setStatus("Checking what predicting outside the FOV would introduce…");
+    const horizonS = parseFloat(el("predict-horizon").value) || 4.0;
+    const body = { horizon_s: horizonS, step_s: 0.2 };
+    const preview = await apiPost(`/api/traces/${state.traceId}/predict`, { ...body, preview: true });
+    if (preview.new_issue_count > 0) {
+      const proceed = window.confirm(
+        `Predicting outside the FOV would introduce ${preview.new_issue_count} new issue(s) ` +
+          `(${preview.before_issue_count} → ${preview.after_issue_count}) -- e.g. an extrapolated path ` +
+          `running off the road or through another vehicle. Add the prediction anyway?`
+      );
+      if (!proceed) {
+        setStatus("Prediction not added.");
+        return;
+      }
+    }
     setStatus("Predicting trajectories before/after the sensor FOV…");
-    const res = await apiPost(`/api/traces/${state.traceId}/predict`, { horizon_s: 4.0, step_s: 0.2 });
+    const res = await apiPost(`/api/traces/${state.traceId}/predict`, body);
     applyScene(res.scene);
     const perVehicle = Object.entries(res.added).map(([vid, dirs]) => {
       const parts = Object.keys(dirs);
       return `veh ${vid} (${parts.join(" + ")})`;
     });
-    setStatus(perVehicle.length ? `Added predictions: ${perVehicle.join(", ")}.` : "No vehicles needed prediction.");
+    const issueNote = preview.new_issue_count > 0 ? ` (${preview.new_issue_count} new issue(s) as warned)` : "";
+    setStatus(
+      (perVehicle.length ? `Added predictions: ${perVehicle.join(", ")}.` : "No vehicles needed prediction.") + issueNote
+    );
   });
 
   el("btn-clear-predict").addEventListener("click", async () => {
@@ -1419,8 +1437,10 @@ async function runScan() {
     if (data.name_collisions) {
       parts.push(
         `${data.name_collisions} adma.csv file(s) shared a trace name with another and were skipped — ` +
-          `their folders likely don't identify the trace.`
+          `either their folders don't identify the trace, or this is a duplicate/reprocessed copy of one ` +
+          `already found elsewhere in the corpus.`
       );
+      for (const eg of data.adma_collision_examples || []) parts.push(`    ${eg}`);
     }
     if (data.unmatched_adma_count) {
       const eg = (data.unmatched_adma_examples || []).join(", ");
@@ -1429,6 +1449,13 @@ async function runScan() {
     if (data.unmatched_xml_count) {
       const eg = (data.unmatched_xml_examples || []).join(", ");
       parts.push(`${data.unmatched_xml_count} annotation file(s) matched no trace${eg ? `, e.g. ${eg}` : ""}.`);
+    }
+    if (data.xml_duplicate_count) {
+      parts.push(
+        `${data.xml_duplicate_count} annotation file(s) matched a trace already claimed by another ` +
+          `annotation file (a duplicate/reprocessed export) and were skipped:`
+      );
+      for (const eg of data.xml_duplicate_examples || []) parts.push(`    ${eg}`);
     }
     el("scan-status").textContent = parts.join("\n");
     const listing = await queryTraces("", 0);

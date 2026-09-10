@@ -81,6 +81,31 @@ def test_neighbor_404_for_unknown_trace(client_with_corpus):
     assert r.status_code == 404
 
 
+def test_predict_preview_reports_issue_impact_without_committing(client_with_corpus):
+    """preview=true must answer 'what would this introduce' without
+    actually adding the prediction, so the GUI can warn before commit."""
+    client, names, _output_dir = client_with_corpus
+    trace_id = names[0]
+
+    r = client.post(f"/api/traces/{trace_id}/predict", json={"preview": True})
+    assert r.status_code == 200
+    data = r.json()
+    assert "scene" not in data  # preview never returns a scene -- nothing was committed
+    assert set(data["added"].keys()) == {"1", "2", "3", "4", "5"}
+    assert data["new_issue_count"] == data["after_issue_count"] - data["before_issue_count"]
+
+    # nothing was actually added: a fresh scene has no synthetic observations
+    scene = client.get(f"/api/traces/{trace_id}/scene").json()
+    assert not any(o["synthetic"] for v in scene["vehicles"] for o in v["observations"])
+
+    # the real (committing) call still works normally afterward
+    r2 = client.post(f"/api/traces/{trace_id}/predict", json={})
+    assert r2.status_code == 200
+    assert "scene" in r2.json()
+    scene2 = client.get(f"/api/traces/{trace_id}/scene").json()
+    assert any(o["synthetic"] for v in scene2["vehicles"] for o in v["observations"])
+
+
 def test_batch_fix_predict_runs_full_pipeline(client_with_corpus):
     client, names, output_dir = client_with_corpus
     r = client.post(f"/api/traces/{names[0]}/batch_fix_predict")

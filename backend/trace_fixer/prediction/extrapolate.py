@@ -36,7 +36,7 @@ EDGE_FRAME_MARGIN = 3  # tracks within this many frames of the clip's start/end 
 # case that matters most: a tailgater or a vehicle the ego is pulling away
 # from. Trailing vehicles get a longer predicted horizon than the base
 # value; a vehicle ahead of the ego is unaffected.
-REAR_HORIZON_MULTIPLIER = 2.0
+REAR_HORIZON_MULTIPLIER = 3.0
 
 
 def _effective_horizon(anchor: VehicleObs, horizon_s: float) -> float:
@@ -90,11 +90,17 @@ def _extrapolate(
     chronological for direction=+1 and reverse-chronological for -1.
     """
     step_us = int(step_s * 1e6) * direction
+    # An integer step count rather than accumulating `elapsed += step_s`:
+    # floating-point drift on the latter occasionally added (or dropped)
+    # one extra step right at the horizon boundary, most visibly once
+    # horizon_s/step_s lands on an exact multiple (e.g. 12.0/0.2).
+    total_steps = round(horizon_s / step_s)
     x, y = anchor.x_m, anchor.y_m
     t_cursor = anchor.t_us + step_us
-    elapsed = 0.0
     synthetic: list[VehicleObs] = []
-    while elapsed < horizon_s and (t_cursor < time_bound_us if direction > 0 else t_cursor > time_bound_us):
+    for _ in range(total_steps):
+        if not (t_cursor < time_bound_us if direction > 0 else t_cursor > time_bound_us):
+            break
         tangent = _nearest_path_tangent(trace.ego, x, y)
         heading = heading + STEER_BLEND * _wrap_rad(tangent - heading)
         x += direction * math.cos(heading) * speed * step_s
@@ -126,7 +132,6 @@ def _extrapolate(
             )
         )
         t_cursor += step_us
-        elapsed += step_s
 
     return synthetic
 

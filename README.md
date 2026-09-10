@@ -109,13 +109,19 @@ from a single frame without scrubbing.
    overtaking it, or it overtaking the ego, while it's presumably still on
    the road). Predicted segments render dashed/purple and are excluded from
    export unless you ask for them (`include_predictions` on the annotation
-   export). A vehicle last (or first) seen *behind* the ego gets twice the
+   export). A vehicle last (or first) seen *behind* the ego gets 3x the
    base horizon in that direction (`REAR_HORIZON_MULTIPLIER` in
    `prediction/extrapolate.py`) — rear/side sensor coverage is typically
    shorter-range than the front cone, so a trailing vehicle (a tailgater,
    or one the ego is pulling away from) tends to drop out of the track
    sooner, which is exactly the case where a longer predicted trail
-   matters most.
+   matters most. The **Prediction horizon (s)** field sets the base value
+   the multiplier is applied to (default 6s, so a trailing vehicle
+   defaults to 18s) — raise it further for a demo that wants a predicted
+   vehicle to stay visible longer. Before committing, the button checks
+   whether the prediction would introduce any new validation issues (an
+   extrapolated path running off the road or through another vehicle) and
+   asks for confirmation if so, rather than adding it silently.
 8. **Apply fixes** smooths flagged vehicle tracks, clamps positions back
    inside the annotated road corridor, and drops trailing observations that
    still overlap the ego vehicle after smoothing (a common "lost the track
