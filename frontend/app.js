@@ -1291,29 +1291,27 @@ function wireControls() {
   });
 
   el("btn-predict").addEventListener("click", async () => {
-    setStatus("Checking what predicting outside the FOV would introduce…");
-    const horizonS = parseFloat(el("predict-horizon").value) || 4.0;
-    const body = { horizon_s: horizonS, step_s: 0.2 };
-    const preview = await apiPost(`/api/traces/${state.traceId}/predict`, { ...body, preview: true });
-    if (preview.new_issue_count > 0) {
-      const proceed = window.confirm(
-        `Predicting outside the FOV would introduce ${preview.new_issue_count} new issue(s) ` +
-          `(${preview.before_issue_count} → ${preview.after_issue_count}) -- e.g. an extrapolated path ` +
-          `running off the road or through another vehicle. Add the prediction anyway?`
-      );
-      if (!proceed) {
-        setStatus("Prediction not added.");
-        return;
-      }
-    }
     setStatus("Predicting trajectories before/after the sensor FOV…");
+    const horizonSRaw = el("predict-horizon-s").value.trim();
+    const horizonMRaw = el("predict-horizon-m").value.trim();
+    const body = {
+      horizon_s: horizonSRaw ? parseFloat(horizonSRaw) : 4.0,
+      step_s: 0.2,
+      horizon_m: horizonMRaw ? parseFloat(horizonMRaw) : null,
+      avoid_collisions: el("predict-avoid-collisions").checked,
+    };
     const res = await apiPost(`/api/traces/${state.traceId}/predict`, body);
     applyScene(res.scene);
     const perVehicle = Object.entries(res.added).map(([vid, dirs]) => {
       const parts = Object.keys(dirs);
       return `veh ${vid} (${parts.join(" + ")})`;
     });
-    const issueNote = preview.new_issue_count > 0 ? ` (${preview.new_issue_count} new issue(s) as warned)` : "";
+    // Reported, not gated on: run validation on the predicted trajectories
+    // and say what changed, rather than blocking the add on a confirm.
+    const issueNote =
+      res.new_issue_count > 0
+        ? ` Validation: ${res.before_issue_count} → ${res.after_issue_count} issue(s) (+${res.new_issue_count}).`
+        : "";
     setStatus(
       (perVehicle.length ? `Added predictions: ${perVehicle.join(", ")}.` : "No vehicles needed prediction.") + issueNote
     );

@@ -185,3 +185,37 @@ def test_duplicate_annotation_for_an_already_matched_trace_is_reported_not_silen
     assert "reprocessed" in result.xml_duplicate_examples[0]
     # the duplicate is a real match, so it must not also inflate unmatched_xml_count
     assert result.unmatched_xml_count == 0
+
+
+def test_scan_descends_into_symlinked_subdirectories(tmp_path):
+    """Real corpora are routinely organized with symlinks (a shared-
+    storage mount, a dedup layer, a 'latest' pointer tree) -- os.walk does
+    not follow them by default, which would silently make everything past
+    a symlink invisible to a scan without any error or diagnostic at all.
+    """
+    from trace_fixer.scan import scan_for_trace_pairs
+
+    real_storage = tmp_path / "real_storage"
+    _make_pair(real_storage, "LB-VS-500_real", "__refQC_IND.xml")
+
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    (corpus / "logstream").symlink_to(real_storage, target_is_directory=True)
+
+    result = scan_for_trace_pairs(corpus)
+    assert set(result.matched) == {"LB-VS-500_real"}
+
+
+def test_scan_does_not_hang_on_a_symlink_cycle(tmp_path):
+    """A symlink pointing back at one of its own ancestors must be
+    skipped on its second visit, not followed forever -- unlike plain
+    os.walk(followlinks=True), which its own docs warn can recurse
+    infinitely in exactly this case."""
+    from trace_fixer.scan import scan_for_trace_pairs
+
+    root = tmp_path / "corpus"
+    _make_pair(root, "LB-VS-600_real", "__refQC_IND.xml")
+    (root / "loop").symlink_to(root, target_is_directory=True)
+
+    result = scan_for_trace_pairs(root)  # must return, not hang
+    assert set(result.matched) == {"LB-VS-600_real"}

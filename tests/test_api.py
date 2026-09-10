@@ -98,12 +98,35 @@ def test_predict_preview_reports_issue_impact_without_committing(client_with_cor
     scene = client.get(f"/api/traces/{trace_id}/scene").json()
     assert not any(o["synthetic"] for v in scene["vehicles"] for o in v["observations"])
 
-    # the real (committing) call still works normally afterward
+    # the real (committing) call still works normally afterward, and
+    # reports the same before/after/new issue counts a preview would --
+    # no separate round-trip needed to see what committing just did.
     r2 = client.post(f"/api/traces/{trace_id}/predict", json={})
     assert r2.status_code == 200
-    assert "scene" in r2.json()
+    data2 = r2.json()
+    assert "scene" in data2
+    assert data2["new_issue_count"] == data2["after_issue_count"] - data2["before_issue_count"]
     scene2 = client.get(f"/api/traces/{trace_id}/scene").json()
     assert any(o["synthetic"] for v in scene2["vehicles"] for o in v["observations"])
+
+
+def test_predict_horizon_m_caps_distance(client_with_corpus):
+    client, names, _output_dir = client_with_corpus
+    trace_id = names[0]
+
+    r = client.post(f"/api/traces/{trace_id}/predict", json={"horizon_s": 10.0, "horizon_m": 5.0})
+    assert r.status_code == 200
+    added_capped = r.json()["added"]
+
+    client.post(f"/api/traces/{trace_id}/predict/clear")
+    r2 = client.post(f"/api/traces/{trace_id}/predict", json={"horizon_s": 10.0})
+    added_uncapped = r2.json()["added"]
+
+    # every vehicle predicted in both calls got fewer (or equal) synthetic
+    # observations once a 5m cap was added on top of the same time budget
+    for vid in added_capped:
+        for direction in added_capped[vid]:
+            assert added_capped[vid][direction] <= added_uncapped[vid][direction]
 
 
 def test_batch_fix_predict_runs_full_pipeline(client_with_corpus):

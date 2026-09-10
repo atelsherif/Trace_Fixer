@@ -93,15 +93,12 @@ body {
   white-space: nowrap;
 }
 
-/* A small gradient mark instead of a logo file -- keeps the app
-   dependency-free while still reading as a product rather than a form. */
-.topbar h1::before {
-  content: "";
-  width: 16px;
-  height: 16px;
+#app-logo {
+  width: 22px;
+  height: 22px;
   border-radius: 5px;
-  background: var(--accent-gradient);
-  box-shadow: 0 0 14px var(--accent-glow);
+  object-fit: contain;
+  flex: none;
 }
 
 .topbar-controls {
@@ -198,6 +195,7 @@ body {
 .trace-listbox {
   max-height: 280px;
   overflow-y: auto;
+  overflow-x: auto;
   border: 1px solid var(--border-soft);
   border-radius: var(--radius-sm);
   background: rgba(0, 0, 0, 0.2);
@@ -208,10 +206,17 @@ body {
   font-size: 12.5px;
   cursor: pointer;
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 8px;
   border-left: 2px solid transparent;
   transition: background 0.12s var(--ease);
+  /* Names run 40-60+ characters and often differ only near the end (a
+     split number, a suffix) -- truncating them hides exactly the part
+     worth reading. min-width:100% keeps a short name filling the row;
+     width:max-content lets a long one push the row (and the listbox's
+     own horizontal scrollbar) wider instead of being cut off. */
+  width: max-content;
+  min-width: 100%;
 }
 
 .trace-listbox-item:hover { background: var(--surface-hi); }
@@ -224,16 +229,13 @@ body {
 
 .trace-listbox-item .trace-listbox-checkbox {
   flex: none;
-  margin-top: 2px;
 }
 
 .trace-listbox-item .trace-listbox-name {
-  /* Real trace filenames run 40-60+ characters -- wrap rather than
-     ellipsize, so the full name is always readable without a hover or a
-     horizontal scrollbar. */
-  overflow-wrap: anywhere;
-  white-space: normal;
-  line-height: 1.35;
+  /* Single line, no ellipsis -- the listbox scrolls horizontally instead
+     (see .trace-listbox), so the tail of a long name (often a split
+     number or suffix) is reachable, not cut off. */
+  white-space: nowrap;
 }
 
 .batch-bar {
@@ -843,6 +845,14 @@ input[type="checkbox"] { accent-color: var(--accent); cursor: pointer; }
   margin-top: 10px;
 }
 .sync-field input[type="range"] { width: 100%; }
+
+.horizon-row {
+  display: flex;
+  gap: 10px;
+  margin: 6px 0 4px 0;
+}
+.horizon-row .text-field { flex: 1; margin: 0; }
+.horizon-row input[type="number"] { width: 100%; }
 
 .status-line {
   font-size: 12px;

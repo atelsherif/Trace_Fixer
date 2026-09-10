@@ -89,3 +89,71 @@ def test_predict_backward_gives_a_trailing_vehicle_a_longer_horizon():
 
     assert n_ahead == round(horizon_s / DEFAULT_STEP_S)
     assert n_behind == round(horizon_s * REAR_HORIZON_MULTIPLIER / DEFAULT_STEP_S)
+
+
+def test_horizon_m_caps_distance_not_just_time():
+    """Whichever of horizon_s/horizon_m is reached first stops the
+    prediction -- a fast-moving vehicle capped by distance should predict
+    fewer steps than the same call with no distance cap at all."""
+    from trace_fixer.prediction.extrapolate import DEFAULT_STEP_S, predict_forward
+
+    trace = Trace(trace_id="t", ego=_ego_trace(), annotation=Annotation(country_code=None))
+    track = VehicleTrack(obj_id=1, obj_type="Car", reflecting_parts=None, observations=[
+        _obs(15.0, 100, x_rel=20.0, x_m=170.0), _obs(16.0, 101, x_rel=25.0, x_m=180.0),  # 10 m/s
+    ])
+    n_unbounded = predict_forward(track, trace, horizon_s=10.0, avoid_collisions=False)
+    assert n_unbounded == round(10.0 / DEFAULT_STEP_S)
+
+    track2 = VehicleTrack(obj_id=1, obj_type="Car", reflecting_parts=None, observations=[
+        _obs(15.0, 100, x_rel=20.0, x_m=170.0), _obs(16.0, 101, x_rel=25.0, x_m=180.0),
+    ])
+    # at 10 m/s, 30m is reached in 3s -- well inside the 10s time cap.
+    n_capped = predict_forward(track2, trace, horizon_s=10.0, horizon_m=30.0, avoid_collisions=False)
+    assert n_capped < n_unbounded
+    assert n_capped == round(3.0 / DEFAULT_STEP_S)
+
+
+def test_avoid_collisions_brakes_instead_of_driving_through_a_stationary_vehicle():
+    """A vehicle predicted straight into another (stationary) vehicle's
+    box must brake -- not drive through it -- when avoid_collisions is on,
+    and must reach further without it, per extrapolate.py's own
+    following-distance-governor design (speed only, no steering)."""
+    from trace_fixer.prediction.extrapolate import DEFAULT_STEP_S, predict_forward
+
+    ego = _ego_trace()
+    # Vehicle 2: parked directly ahead of vehicle 1's straight-line path,
+    # for the whole span vehicle 1's prediction could possibly reach.
+    obstacle_obs = [
+        _obs(t, 200 + i, x_rel=50.0, x_m=200.0) for i, t in enumerate([15.0 + k * 0.5 for k in range(40)])
+    ]
+    obstacle = VehicleTrack(obj_id=2, obj_type="Car", reflecting_parts=None, observations=obstacle_obs)
+
+    def make_moving_track():
+        return VehicleTrack(obj_id=1, obj_type="Car", reflecting_parts=None, observations=[
+            _obs(15.0, 100, x_rel=20.0, x_m=170.0), _obs(16.0, 101, x_rel=25.0, x_m=180.0),  # 10 m/s toward x=200
+        ])
+
+    trace_guarded = Trace(
+        trace_id="t", ego=ego, annotation=Annotation(country_code=None, vehicles={2: obstacle})
+    )
+    guarded_track = make_moving_track()
+    trace_guarded.annotation.vehicles[1] = guarded_track
+    predict_forward(guarded_track, trace_guarded, horizon_s=10.0, step_s=DEFAULT_STEP_S, avoid_collisions=True)
+
+    trace_unguarded = Trace(
+        trace_id="t", ego=_ego_trace(), annotation=Annotation(country_code=None, vehicles={2: obstacle})
+    )
+    unguarded_track = make_moving_track()
+    trace_unguarded.annotation.vehicles[1] = unguarded_track
+    predict_forward(unguarded_track, trace_unguarded, horizon_s=10.0, step_s=DEFAULT_STEP_S, avoid_collisions=False)
+
+    guarded_synth = [o for o in guarded_track.observations if o.synthetic]
+    guarded_max_x = max(o.x_m for o in guarded_synth)
+    unguarded_max_x = max(o.x_m for o in unguarded_track.observations if o.synthetic)
+    # Unguarded drives straight through the obstacle at x=200; guarded
+    # brakes well short of driving through it, then holds position
+    # (its last few steps are identical -- it came to a full stop).
+    assert unguarded_max_x > 220.0
+    assert guarded_max_x < 210.0
+    assert guarded_max_x < unguarded_max_x
+    assert {o.x_m for o in guarded_synth[-5:]} == {guarded_max_x}

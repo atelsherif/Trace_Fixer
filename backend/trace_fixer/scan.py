@@ -5,8 +5,11 @@ store.register_external) and parsed lazily, on first access, just like any
 other trace.
 
 Expected layout (matches the customer's export tooling), but only the
-*filenames* matter -- the directory nesting is walked recursively, so this
-tolerates minor structural variations:
+*filenames* matter -- the directory nesting is walked recursively
+(including through symlinked subdirectories -- large real corpora are
+routinely organized that way, and Python's own os.walk does not descend
+into a symlinked directory by default), so this tolerates minor
+structural variations:
 
     <root>/.../adma/.../<trace_name>/adma.csv
     <root>/.../annotations/.../<trace_name>__ref-QC_IND.xml   (or __refQC_IND.xml, etc.)
@@ -91,6 +94,42 @@ def _trace_name_for_adma(adma_path: Path, root: Path) -> str:
     return adma_path.parent.name
 
 
+def _walk_following_symlinks(root: Path):
+    """Like os.walk, but descends into symlinked subdirectories -- large
+    real corpora are routinely organized with symlinks (a shared-storage
+    mount, a dedup/reprocessing layer, a "latest" pointer tree), and
+    os.walk's own `followlinks=True` isn't safe to use as-is: its own docs
+    warn it can recurse forever if a link points back at one of its own
+    ancestors, since it "does not keep track of the directories it has
+    already visited." This does, by realpath, so a symlink cycle is
+    silently skipped (its second visit, not its first) rather than
+    hanging the scan.
+    """
+    visited: set[str] = set()
+    stack = [root]
+    while stack:
+        current = stack.pop()
+        real = os.path.realpath(current)
+        if real in visited:
+            continue
+        visited.add(real)
+        try:
+            entries = list(os.scandir(current))
+        except OSError:
+            continue
+        filenames = []
+        for entry in entries:
+            try:
+                is_dir = entry.is_dir(follow_symlinks=True)
+            except OSError:
+                continue
+            if is_dir:
+                stack.append(Path(entry.path))
+            else:
+                filenames.append(entry.name)
+        yield str(current), filenames
+
+
 def scan_for_trace_pairs(root: Path) -> ScanResult:
     root = Path(root)
     if not root.is_dir():
@@ -102,7 +141,7 @@ def scan_for_trace_pairs(root: Path) -> ScanResult:
     name_collisions = 0
     adma_collision_examples: list[str] = []
 
-    for dirpath, _dirnames, filenames in os.walk(root):
+    for dirpath, filenames in _walk_following_symlinks(root):
         for fname in filenames:
             lower = fname.lower()
             if lower == ADMA_FILENAME:

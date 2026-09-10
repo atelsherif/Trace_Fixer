@@ -223,12 +223,22 @@ class PredictRequest(BaseModel):
     step_s: float = 0.2
     backward: bool = True
     forward: bool = True
+    # Optional distance cap alongside horizon_s's time cap -- whichever
+    # limit is reached first stops the prediction (see
+    # prediction/extrapolate.py's _extrapolate). None = time only, the
+    # original behavior.
+    horizon_m: float | None = None
+    # The predicted vehicle brakes (down to a full stop) rather than
+    # driving through the ego or another vehicle's box -- see
+    # extrapolate.py's module docstring. Only disable this to compare
+    # against the older, collision-unaware behavior.
+    avoid_collisions: bool = True
     # When true, predicts and validates on a throwaway copy of the trace
     # and reports what issues the prediction *would* introduce without
-    # actually adding it -- lets the GUI warn before committing a
+    # actually adding it -- lets a caller check before committing a
     # prediction that turns out to create new validation issues (an
-    # unrealistic extrapolation clipping through another vehicle, running
-    # off the road, etc.) instead of finding out only after the fact.
+    # unavoidable-by-braking-alone conflict, an extrapolation running off
+    # the road, etc.) instead of finding out only after the fact.
     preview: bool = False
 
 
@@ -258,6 +268,10 @@ class FixExportOptions(PredictRequest):
 @app.post("/api/traces/{trace_id}/predict")
 def predict(trace_id: str, req: PredictRequest = PredictRequest()):
     trace = _get_trace_or_404(trace_id)
+    predict_kwargs = dict(
+        horizon_s=req.horizon_s, step_s=req.step_s, backward=req.backward, forward=req.forward,
+        horizon_m=req.horizon_m, avoid_collisions=req.avoid_collisions,
+    )
 
     if req.preview:
         # A throwaway copy: predict_backward/predict_forward reassign
@@ -266,9 +280,7 @@ def predict(trace_id: str, req: PredictRequest = PredictRequest()):
         # would still mutate the live trace's tracks in place.
         before_issue_count = len(run_validation(trace))
         preview_trace = copy.deepcopy(trace)
-        added = predict_all(
-            preview_trace, horizon_s=req.horizon_s, step_s=req.step_s, backward=req.backward, forward=req.forward
-        )
+        added = predict_all(preview_trace, **predict_kwargs)
         after_issue_count = len(run_validation(preview_trace))
         return {
             "added": added,
@@ -277,11 +289,16 @@ def predict(trace_id: str, req: PredictRequest = PredictRequest()):
             "new_issue_count": max(0, after_issue_count - before_issue_count),
         }
 
-    added = predict_all(
-        trace, horizon_s=req.horizon_s, step_s=req.step_s, backward=req.backward, forward=req.forward
-    )
-    run_validation(trace)
-    return {"added": added, "scene": build_scene_json(trace)}
+    before_issue_count = len(run_validation(trace))
+    added = predict_all(trace, **predict_kwargs)
+    after_issue_count = len(run_validation(trace))
+    return {
+        "added": added,
+        "scene": build_scene_json(trace),
+        "before_issue_count": before_issue_count,
+        "after_issue_count": after_issue_count,
+        "new_issue_count": max(0, after_issue_count - before_issue_count),
+    }
 
 
 @app.post("/api/traces/{trace_id}/predict/clear")
@@ -303,7 +320,10 @@ def _fix_predict_and_write_output(trace_id: str, opts: FixExportOptions) -> dict
     before = run_validation(trace)
     fix_summary = apply_fixes(trace) if opts.fix_issues else {}
     added = (
-        predict_all(trace, horizon_s=opts.horizon_s, step_s=opts.step_s, backward=opts.backward, forward=opts.forward)
+        predict_all(
+            trace, horizon_s=opts.horizon_s, step_s=opts.step_s, backward=opts.backward, forward=opts.forward,
+            horizon_m=opts.horizon_m, avoid_collisions=opts.avoid_collisions,
+        )
         if opts.predict_trajectories
         else {}
     )

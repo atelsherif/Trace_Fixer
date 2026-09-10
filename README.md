@@ -48,6 +48,26 @@ Run the test suite with:
 python3 -m pytest
 ```
 
+### Logo
+
+Drop a logo file at `frontend/logo.png` and it's picked up automatically —
+no code change needed, no restart required (a static file, served
+straight from `frontend/`): it becomes both the browser-tab favicon and
+the small mark next to "PreTwinner" in the top bar. Until that file
+exists, both spots quietly fall back to no icon / text-only (an
+`onerror` handler in `index.html`, not a missing-image icon), so its
+absence is never an error.
+
+Recommended: **square**, **PNG**, **at least 256×256px** (512×512 is
+safer for a crisp favicon on high-DPI displays) — the topbar mark is
+rendered at 22×22px (`#app-logo` in `style.css`) and the browser picks
+whatever favicon size it wants from the same file, so one reasonably
+large square image covers both uses; no need to pre-generate multiple
+sizes or an `.ico`. Transparent background works fine for the topbar
+mark; for the favicon, a background that reads on both light and dark
+browser chrome (most logos with real content already do) is safer than
+fully transparent.
+
 ## Using the GUI
 
 The layout is three columns. A thin titlebar above the viewport names the
@@ -115,13 +135,30 @@ from a single frame without scrubbing.
    shorter-range than the front cone, so a trailing vehicle (a tailgater,
    or one the ego is pulling away from) tends to drop out of the track
    sooner, which is exactly the case where a longer predicted trail
-   matters most. The **Prediction horizon (s)** field sets the base value
-   the multiplier is applied to (default 6s, so a trailing vehicle
-   defaults to 18s) — raise it further for a demo that wants a predicted
-   vehicle to stay visible longer. Before committing, the button checks
-   whether the prediction would introduce any new validation issues (an
-   extrapolated path running off the road or through another vehicle) and
-   asks for confirmation if so, rather than adding it silently.
+   matters most. The **Horizon (s)** field sets the base value the
+   multiplier is applied to (default 6s, so a trailing vehicle defaults
+   to 18s); **Horizon (m)** is an optional second cap, in meters (e.g. a
+   sensor's real-world range) — whichever of the two limits is hit first
+   stops the prediction, and either can be left blank to disable it (both
+   blank falls back to a 4s time-only default). Re-running validation
+   afterward is automatic either way; the status line reports the before
+   → after issue count so a prediction that introduced new ones is
+   visible immediately rather than a silent surprise.
+
+   **Avoid predicted collisions** (checked by default) makes a predicted
+   vehicle brake — down to a full stop if needed, never swerve — rather
+   than driving straight through the ego or another vehicle's box; see
+   `REAR_HORIZON_MULTIPLIER`'s neighboring constants in
+   `prediction/extrapolate.py` for the braking/recovery rates, both kept
+   well under the validator's own "unrealistic acceleration" threshold so
+   the governor's own braking never introduces a *new* kinematic issue.
+   It runs `predict_all` in two passes: an ungoverned first pass gives
+   every vehicle some full-length predicted path, so the second, governed
+   pass has real data on every *other* vehicle to react to, not just
+   whichever ones happen to be processed earlier in a single pass. A
+   conflict closing faster than realistic braking can resolve still shows
+   up as a collision issue afterward — that's the honest outcome for a
+   speed-only governor with no steering, not a bug.
 8. **Apply fixes** smooths flagged vehicle tracks, clamps positions back
    inside the annotated road corridor, and drops trailing observations that
    still overlap the ego vehicle after smoothing (a common "lost the track
@@ -198,9 +235,28 @@ The scan summary reports the raw `adma.csv` file count alongside the number
 of distinct trace names it produced, any name collisions, and a sample of
 the unmatched files on both sides — so a corpus that scans to a
 surprisingly low number of pairs can be diagnosed from the GUI rather than
-guessed at. Scanned traces are registered *by reference* — nothing is
-copied or parsed until you actually open one, so scanning ~20,000 files
-takes well under a second.
+guessed at. It also separately reports **duplicates**: a second `adma.csv`
+or annotation file resolving to a trace name a *first* one already
+claimed (e.g. a reprocessed/re-exported copy of the same trace living
+elsewhere in the corpus) is a real match, just not the one that won the
+slot — distinct from "unmatched" (it never failed to resolve a trace name
+at all), and previously invisible in every diagnostic. Each example names
+both the dropped path and the path that won, so a specific missing pair
+can be traced to its duplicate.
+
+The walk follows symlinked subdirectories (cycle-safe — a symlink pointing
+back at one of its own ancestors is skipped on its second visit rather
+than followed forever). This matters because large real corpora are
+routinely organized with them (a shared-storage mount, a dedup layer, a
+"latest" pointer tree), and without it, everything past a first symlink
+in the tree is silently invisible to a scan — no error, no diagnostic,
+just a much lower match count than the same corpus produced before,
+which is indistinguishable from a dozen other causes until you know to
+look for it.
+
+Scanned traces are registered *by reference* — nothing is copied or
+parsed until you actually open one, so scanning ~20,000 files takes well
+under a second.
 
 Type a path directly into the field, or click **Browse…** to navigate the
 filesystem *on the machine running the server* (the normal case for this
