@@ -65,13 +65,43 @@ def _track(y_rels, times, heading_deg=270.0, width=1.8):
 TIMES = [i * 100_000 for i in range(12)]
 
 
+def _scene(y_rels, border, times=None):
+    """A Trace assembled the way a real one is -- including
+    populate_global_coords, which is what fills the border snapshots'
+    `points_m`. The corridor check reads those global points and reprojects
+    them into each observation's own ego frame (see geo.road_corridor), so
+    a fixture that only sets `points_rel` describes a road with no geometry
+    in it.
+
+    Returns (track, border_lines, ego_interpolator) ready for offroad_runs.
+    """
+    from trace_fixer.geo.populate import populate_global_coords
+    from trace_fixer.geo.transform import EgoInterpolator
+    from trace_fixer.models import Annotation, EgoPose, EgoTrace, Trace
+
+    times = times or TIMES
+    # Ego crawling along +x at 1 m/s so the ego frame is effectively fixed:
+    # these fixtures are about the corridor, not about ego motion.
+    poses = [
+        EgoPose(t_us=t, lat_deg=0.0, lon_deg=0.0, heading_deg=270.0, vx_mps=1.0, vy_mps=0.0, vz_mps=0.0)
+        for t in range(0, max(times) + 1_000_000, 100_000)
+    ]
+    track = _track(y_rels, times)
+    trace = Trace(
+        trace_id="t", ego=EgoTrace(poses=poses),
+        annotation=Annotation(country_code=None, vehicles={1: track}, border_lines=border),
+    )
+    populate_global_coords(trace)
+    return track, trace.annotation.border_lines, EgoInterpolator(trace.ego)
+
+
 def test_a_box_parked_just_outside_the_edge_is_noise_not_a_departure():
     """The case the clamp exists for: road-parallel, sub-meter, comes back."""
     from trace_fixer.geo.road_departure import offroad_runs
 
     border = {1: _straight_border(1, -3.0, TIMES)}
     y = [-2.0] * 4 + [-4.2] * 3 + [-2.0] * 5  # ~0.4 m past the edge, briefly
-    runs = offroad_runs(_track(y, TIMES), border)
+    runs = offroad_runs(*_scene(y, border))
     assert len(runs) == 1
     assert not runs[0].is_departure
     assert runs[0].side == "right"
@@ -83,7 +113,7 @@ def test_a_vehicle_that_turns_off_the_road_is_a_departure():
     border = {1: _straight_border(1, -3.0, TIMES)}
     # steadily peels off to the right and never returns
     y = [-2.0] * 3 + [-4.0, -6.0, -8.0, -10.0, -12.0, -14.0, -16.0, -18.0, -20.0]
-    runs = offroad_runs(_track(y[: len(TIMES)], TIMES), border)
+    runs = offroad_runs(*_scene(y[: len(TIMES)], border))
     assert len(runs) == 1
     assert runs[0].is_departure
     assert runs[0].peak_m > 4.0
@@ -96,7 +126,7 @@ def test_one_turn_off_is_one_issue_not_one_per_frame():
 
     border = {1: _straight_border(1, -3.0, TIMES)}
     y = [-2.0] * 2 + [-6.0 - i for i in range(10)]
-    runs = offroad_runs(_track(y[: len(TIMES)], TIMES), border)
+    runs = offroad_runs(*_scene(y[: len(TIMES)], border))
     assert len(runs) == 1
     assert runs[0].t_start_us == TIMES[2]
     assert runs[0].t_end_us == TIMES[-1]

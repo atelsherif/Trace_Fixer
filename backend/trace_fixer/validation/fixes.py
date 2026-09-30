@@ -62,6 +62,13 @@ SMOOTH_BLEND_S = 0.5
 MAX_SMOOTH_SHIFT_M = 1.0
 # Same idea for the corridor clamp.
 MAX_CLAMP_M = 1.5
+# How fast the corridor correction may ramp in and out along a track. A
+# correction applied independently per observation is a lateral step, and a
+# step is a velocity spike; ramping it keeps the repair from introducing the
+# kinematic implausibility it exists to remove. Well under a real lane
+# change (~1 m/s lateral), because this is an annotation correction and
+# should not read as a manoeuvre.
+MAX_CLAMP_RATE_MPS = 0.5
 
 
 def _flagged_windows(trace: Trace, obj_id: int) -> list[tuple[int, int]]:
@@ -183,40 +190,87 @@ def _reproject_relative(track: VehicleTrack, interp: EgoInterpolator, sync_offse
         o.zrot = global_heading_to_zrot(math.radians(o.heading_deg), eyaw)
 
 
+def _rate_limit_corrections(corrections: list[float], times_us: list[int]) -> list[float]:
+    """Ramps a per-observation lateral correction in and out instead of
+    switching it on.
+
+    A correction computed independently per observation is discontinuous:
+    clamping one observation 1.3 m while leaving its neighbour untouched
+    puts a 1.3 m lateral step into 0.16 s, which is an 8 m/s sideways jump
+    -- and the validator, quite rightly, then flags the "fixed" track for
+    implausible acceleration. A repair that introduces the kind of defect it
+    exists to remove is not a repair.
+
+    Two passes cap how fast the correction may grow from either direction,
+    so it tapers up to its full value and back down, and never exceeds what
+    the corridor asked for. Same rate-limiting idea as the prediction
+    governor's braking and its box-heading convergence.
+    """
+    n = len(corrections)
+    limited = list(corrections)
+    for i in range(1, n):
+        dt = (times_us[i] - times_us[i - 1]) / 1e6
+        cap = abs(limited[i - 1]) + MAX_CLAMP_RATE_MPS * max(dt, 0.0)
+        limited[i] = math.copysign(min(abs(limited[i]), cap), limited[i])
+    for i in range(n - 2, -1, -1):
+        dt = (times_us[i + 1] - times_us[i]) / 1e6
+        cap = abs(limited[i + 1]) + MAX_CLAMP_RATE_MPS * max(dt, 0.0)
+        limited[i] = math.copysign(min(abs(limited[i]), cap), limited[i])
+    return limited
+
+
 def _clamp_offroad(track: VehicleTrack, trace: Trace, interp: EgoInterpolator) -> tuple[int, int]:
     """Pulls boxes that sit slightly outside the annotated corridor back
     inside it. Returns (departures_left_alone, clamps_refused_as_too_large).
 
     Observations the departure classifier calls a real turn-off are skipped,
     and so is any correction larger than MAX_CLAMP_M: the recorded position
-    stands, and the validator's flag stands with it.
+    stands, and the validator's flag stands with it. What survives both
+    tests is then rate-limited along the track (see above) so the corrected
+    stretch rejoins the recorded one continuously.
     """
-    labels = classify_offroad(track, trace.annotation.border_lines)
+    labels = classify_offroad(track, trace.annotation.border_lines, interp, trace.sync_offset_us)
     departures = 0
     too_large = 0
+    poses: list[tuple[float, float, float]] = []
+    corrections: list[float] = []
     for o in track.observations:
+        t_ego_us = apply_offset(o.t_us, trace.sync_offset_us)
+        ex, ey, eyaw, _ = interp.at(t_ego_us)
+        poses.append((ex, ey, eyaw))
         if labels.get(o.t_us) == DEPARTURE:
             departures += 1
+            corrections.append(0.0)
             continue
-        left, right = corridor_bounds(trace.annotation.border_lines, o.t_us, o.x_rel)
+        left, right = corridor_bounds(
+            trace.annotation.border_lines, o.t_us, ex, ey, eyaw, o.x_rel
+        )
         half_w = o.width / 2.0
         new_y_rel = o.y_rel
         if left is not None and o.y_rel - half_w > left - OFFROAD_MARGIN_M:
             new_y_rel = left - OFFROAD_MARGIN_M + half_w
         elif right is not None and o.y_rel + half_w < right + OFFROAD_MARGIN_M:
             new_y_rel = right + OFFROAD_MARGIN_M - half_w
-        shift = abs(new_y_rel - o.y_rel)
+        delta = new_y_rel - o.y_rel
         # Same floor the off-road check uses, so the clamp never edits
         # something the validator didn't consider worth flagging.
-        if shift < MIN_EXCURSION_M:
+        if abs(delta) < MIN_EXCURSION_M:
+            corrections.append(0.0)
             continue
-        if shift > MAX_CLAMP_M:
+        if abs(delta) > MAX_CLAMP_M:
             too_large += 1
+            corrections.append(0.0)
             continue
-        o.y_rel = new_y_rel
+        corrections.append(delta)
+
+    times = [o.t_us for o in track.observations]
+    for o, (ex, ey, eyaw), delta in zip(
+        track.observations, poses, _rate_limit_corrections(corrections, times)
+    ):
+        if abs(delta) < MIN_EXCURSION_M:
+            continue
+        o.y_rel += delta
         o.fixed = True
-        t_ego_us = apply_offset(o.t_us, trace.sync_offset_us)
-        ex, ey, eyaw, _ = interp.at(t_ego_us)
         o.x_m, o.y_m = ego_relative_to_global(o.x_rel, o.y_rel, ex, ey, eyaw)
     return departures, too_large
 

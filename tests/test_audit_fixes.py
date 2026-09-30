@@ -287,3 +287,73 @@ def test_two_batch_runs_of_the_same_trace_agree():
     second = client.post("/api/traces/sample2/batch_fix_predict").json()
     for key in ("before_issue_count", "after_issue_count", "provenance", "predicted"):
         assert first[key] == second[key], key
+
+
+# --- the corridor is judged in the observation's own ego frame ----------
+
+def test_the_corridor_is_reprojected_into_the_observations_ego_frame():
+    """A border snapshot's points_rel are in the ego frame at *that
+    snapshot's* time. Testing a vehicle's y_rel from a different time
+    against them compares two ego frames as if they were one, and the error
+    is roughly x_rel * sin(delta_yaw). The ego here pivots in place:
+    contrived, but it isolates rotation from translation, which is the
+    whole point.
+
+    The road edges sit at a constant +/-5 m in the snapshot's own frame.
+    Ten degrees of ego rotation later, reprojected into the frame the
+    observation is actually in, the nearest edge at x_rel = 40 m is at
+    +2.0 m -- so a vehicle at y_rel = 4.0 is a metre and a third outside
+    it. Read from the stale snapshot frame the edge still looks like +5 m
+    and the vehicle looks safely inside.
+    """
+    import math
+
+    from trace_fixer.geo.populate import populate_global_coords
+    from trace_fixer.geo.road_corridor import corridor_bounds, corridor_excursion
+    from trace_fixer.geo.transform import EgoInterpolator
+    from trace_fixer.models import (
+        Annotation, BorderLine, EgoPose, EgoTrace, LaneSnapshot, Trace, VehicleObs, VehicleTrack,
+    )
+
+    poses = [
+        EgoPose(
+            t_us=int(i * 1e5), lat_deg=0.0, lon_deg=0.0,
+            heading_deg=270.0 - min(10.0, max(0.0, (i * 0.1 - 0.5) * 2.5)),
+            vx_mps=0.0, vy_mps=0.0, vz_mps=0.0,
+        )
+        for i in range(100)
+    ]
+    ego = EgoTrace(poses=poses)
+
+    def edge(obj_id, y):
+        return BorderLine(obj_id=obj_id, obj_type="Road Edge", snapshots=[
+            LaneSnapshot(t_us=500_000, frame=5, points_rel=[(float(x), y) for x in range(-20, 121, 5)])
+        ])
+
+    obs = VehicleObs(
+        t_us=5_000_000, frame=50, obj_movement="Moving", obj_lane="EGO lane",
+        obj_confidence="High", x_rel=40.0, y_rel=4.0, z_rel=0.0,
+        length=4.5, width=1.9, height=1.5, zrot=0.0,
+    )
+    trace = Trace(
+        trace_id="t", ego=ego,
+        annotation=Annotation(
+            country_code=None,
+            vehicles={1: VehicleTrack(obj_id=1, obj_type="Car", reflecting_parts=None, observations=[obs])},
+            border_lines={1: edge(1, 5.0), 2: edge(2, -5.0)},
+        ),
+    )
+    populate_global_coords(trace)
+    interp = EgoInterpolator(ego)
+    ex, ey, eyaw, _ = interp.at(obs.t_us)
+    _, _, snap_yaw, _ = interp.at(500_000)
+    assert abs(math.degrees(snap_yaw - eyaw)) > 9.0, "fixture must actually rotate the ego"
+
+    # Sanity-check the premise: the two frames really do disagree about
+    # where the edge is, by three metres.
+    left_here, _ = corridor_bounds(trace.annotation.border_lines, obs.t_us, ex, ey, eyaw, obs.x_rel)
+    assert left_here == pytest.approx(2.02, abs=0.1)
+
+    out, side = corridor_excursion(trace.annotation.border_lines, obs, ex, ey, eyaw)
+    assert side == "left", "reading the stale snapshot frame hides this entirely"
+    assert out > 1.0

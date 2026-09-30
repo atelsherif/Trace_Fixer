@@ -724,7 +724,7 @@ and explainable rules are what an annotation QA team can act on directly.
 |---|---|---|
 | Kinematic (vehicles) | Implied speed / acceleration / yaw-rate between consecutive observations exceeds highway-driving thresholds. Acceleration is a *centred* difference: the two interval speeds it compares sit half an interval either side of the observation, so the time between them is `(dt0 + dt1) / 2`. Dividing by `dt1` alone (as this used to) is right only when keyframes are evenly spaced, and overstated acceleration by `dt0/dt1` when they weren't — on sample2 that was 8 of 20 flags | Yes — spline smoothing of position over the flagged stretch only, capped at 1 m of movement, heading re-derived from the smoothed path tangent where (and only where) the position moved |
 | Kinematic (ego/ADMA) | Same, on the ADMA trace itself | No — flagged only; the ego trace is the foundation everything else is built on, so it isn't auto-edited without review |
-| Off-road | Vehicle crosses the nearest annotated Road Edge / Guardrail boundary while staying road-parallel | Yes — lateral clamp back inside the corridor (+ margin), up to 1.5 m; a larger correction than that is declined and the flag stands |
+| Off-road | Vehicle crosses the nearest annotated Road Edge / Guardrail boundary while staying road-parallel. The boundary's stored geometry is reprojected into the observation's own ego frame first — it is recorded relative to the ego at *its* keyframe, which can be many seconds and several degrees of rotation away | Yes — lateral clamp back inside the corridor (+ margin), up to 1.5 m, ramped in and out at `MAX_CLAMP_RATE_MPS` so the correction can't become a lateral velocity spike. A larger correction is declined and the flag stands |
 | Road departure | Vehicle *leaves* the ego's road — an exit ramp, a turn into a side street | No — reported for review and left exactly as recorded (see below) |
 | Collision (vehicle↔ego) | Bounding boxes overlap | Trailing overlaps (track ends inside the ego box — a common "lost track as it merged" artifact) are trimmed. Mid-track overlaps are flagged only |
 | Collision (vehicle↔vehicle) | Bounding boxes overlap | Flagged only (no auto-fix — resolving which of two vehicles is "wrong" isn't well-defined without more context, including between two independently-predicted pre-FOV segments) |
@@ -1260,23 +1260,17 @@ Two consequences worth knowing:
   ego-relative keyframes (not one per frame); the GUI renders the union of
   all keyframe snapshots as static road geometry, which is a good
   approximation but not a continuously-updated live corridor.
-- **The off-road check compares ego frames from different times.** This is
-  the biggest known soft spot, and it is worth reading the caveat at the
-  top of `geo/road_corridor.py` before trusting an `off_road` or
-  `road_departure` verdict on a curve. A border snapshot's `points_rel` are
-  in the ego frame at *that snapshot's* time, but they are tested against a
-  vehicle's `y_rel` from the observation's time — and snapshots are sparse:
-  on the bundled samples the median observation is judged against geometry
-  1.7–3.5 s away, the worst against geometry 12.6 s away, which at 25 m/s
-  is several hundred metres of ego travel plus whatever the ego rotated
-  through. Where the road is straight the two frames nearly coincide and
-  the verdict is sound; on a curve it is not.
-
-  The principled fix is to reproject the stored *global* border points
-  (`points_m`) into the ego frame of the observation being judged — a road
-  edge does not move, so in world coordinates every snapshot stays valid
-  for the whole clip. That was tried and backed out: it flips verdicts
-  often enough to matter (on sample2 it moved one vehicle's departure from
-  the left side to the right), and two bundled traces are not enough to
-  tell which answer is correct. It needs a corpus with known-good off-road
-  ground truth before it goes in.
+- **The off-road check is only as good as the annotated corridor.** Border
+  snapshots are sparse — across a 25-trace corpus the median observation's
+  nearest snapshot is 1.6 s away, the 90th percentile 7.0 s, the worst
+  20.6 s. The geometry is now reprojected into each observation's own ego
+  frame (see `geo/road_corridor.py`), which removes the frame error, but
+  a corridor interpolated from a snapshot twenty seconds away is still an
+  estimate of where the road was, not a measurement.
+- **The corridor clamp trades completeness for continuity.** Corrections
+  are rate-limited along the track (`MAX_CLAMP_RATE_MPS`), so an
+  observation at the edge of an excursion is deliberately left partly
+  outside the corridor rather than yanked in. It still flags. That is the
+  intended trade — a clamp that steps a box 1.3 m sideways in 0.16 s
+  introduces the kinematic implausibility it exists to remove — but it
+  means `off_road` counts do not go to zero after fixing, and shouldn't.

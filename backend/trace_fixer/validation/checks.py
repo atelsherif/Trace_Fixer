@@ -231,8 +231,11 @@ def _offroad_checks(trace: Trace, counter: list[int]) -> list[Issue]:
     geo.road_departure for the discriminator.
     """
     issues: list[Issue] = []
+    ego_interp = EgoInterpolator(trace.ego)
     for track in trace.annotation.vehicles.values():
-        for run in offroad_runs(track, trace.annotation.border_lines):
+        for run in offroad_runs(
+            track, trace.annotation.border_lines, ego_interp, trace.sync_offset_us
+        ):
             if run.is_departure:
                 issues.append(
                     Issue(

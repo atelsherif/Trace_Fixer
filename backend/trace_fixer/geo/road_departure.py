@@ -22,6 +22,8 @@ import math
 from dataclasses import dataclass
 
 from trace_fixer.geo.road_corridor import corridor_excursion
+from trace_fixer.geo.sync import apply_offset
+from trace_fixer.geo.transform import EgoInterpolator
 from trace_fixer.models import BorderLine, VehicleTrack
 
 # Beyond this far outside the edge, a lateral annotation error is no longer a
@@ -113,12 +115,24 @@ def _turn_deg(track: VehicleTrack, start: int, end: int) -> float:
     return max(_axis_angle_deg(o.zrot) for o in obs[start : end + 1])
 
 
-def offroad_runs(track: VehicleTrack, border_lines: dict[int, BorderLine]) -> list[OffroadRun]:
+def offroad_runs(
+    track: VehicleTrack,
+    border_lines: dict[int, BorderLine],
+    ego_interp: EgoInterpolator,
+    sync_offset_us: int = 0,
+) -> list[OffroadRun]:
     """Every stretch of `track` spent outside the annotated corridor, each
     classified as a whole so a single turn-off can't come back as a mix of
-    both labels."""
+    both labels.
+
+    `ego_interp` supplies the ego pose at each observation's own time, which
+    is the frame the corridor has to be judged in -- see geo.road_corridor.
+    """
     obs = track.observations
-    measured = [corridor_excursion(border_lines, o) for o in obs]
+    measured = []
+    for o in obs:
+        ex, ey, eyaw, _ = ego_interp.at(apply_offset(o.t_us, sync_offset_us))
+        measured.append(corridor_excursion(border_lines, o, ex, ey, eyaw))
     excursions = [m[0] for m in measured]
 
     runs: list[OffroadRun] = []
@@ -154,12 +168,17 @@ def offroad_runs(track: VehicleTrack, border_lines: dict[int, BorderLine]) -> li
     return runs
 
 
-def classify_offroad(track: VehicleTrack, border_lines: dict[int, BorderLine]) -> dict[int, str]:
+def classify_offroad(
+    track: VehicleTrack,
+    border_lines: dict[int, BorderLine],
+    ego_interp: EgoInterpolator,
+    sync_offset_us: int = 0,
+) -> dict[int, str]:
     """offroad_runs() flattened to {observation t_us: NOISE | DEPARTURE}, for
     callers that walk observations rather than runs (the fix engine's
     corridor clamp). Observations inside the corridor are absent."""
     labels: dict[int, str] = {}
-    for run in offroad_runs(track, border_lines):
+    for run in offroad_runs(track, border_lines, ego_interp, sync_offset_us):
         for o in track.observations:
             if run.t_start_us <= o.t_us <= run.t_end_us:
                 labels[o.t_us] = run.label
