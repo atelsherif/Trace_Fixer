@@ -254,3 +254,149 @@ def test_link_continuations_can_be_turned_off():
     trace = _continuation_trace()
     added = predict_all(trace, horizon_s=4.0, link_continuations=False)
     assert "backward" in added.get(4, {})
+
+
+# --- The governor only reacts to what's in front -----------------------
+
+def test_a_predicted_vehicle_does_not_brake_for_a_tailgater():
+    """Braking can only open a gap to something ahead; braking for a
+    vehicle *behind* closes the gap to it. Two long trucks nose-to-tail had
+    the leader brake for its own follower and then stop predicting
+    altogether, because no amount of braking could ever clear it -- which
+    is what left the follower with nothing to follow and produced the
+    overlap this whole governor exists to prevent.
+    """
+    from trace_fixer.prediction.extrapolate import DEFAULT_STEP_S, predict_forward
+
+    ego = _ego_trace()
+    # A 20 m truck sitting 21 m behind the leader, i.e. close enough that
+    # the two boxes (plus the safety margin) already overlap.
+    follower_obs = [
+        _obs(t, 200 + i, x_rel=-30.0, x_m=179.0 + 10.0 * (t - 15.0))
+        for i, t in enumerate([15.0 + k * 0.5 for k in range(40)])
+    ]
+    for o in follower_obs:
+        o.length, o.width = 20.0, 2.8
+    follower = VehicleTrack(obj_id=2, obj_type="Truck", reflecting_parts=None, observations=follower_obs)
+
+    leader = VehicleTrack(obj_id=1, obj_type="Truck", reflecting_parts=None, observations=[
+        _obs(15.0, 100, x_rel=-10.0, x_m=200.0), _obs(16.0, 101, x_rel=-10.0, x_m=210.0),
+    ])
+    for o in leader.observations:
+        o.length, o.width = 20.0, 2.8
+
+    def predicted(avoid_collisions):
+        track = VehicleTrack(obj_id=1, obj_type="Truck", reflecting_parts=None, observations=[
+            _obs(15.0, 100, x_rel=-10.0, x_m=200.0), _obs(16.0, 101, x_rel=-10.0, x_m=210.0),
+        ])
+        for o in track.observations:
+            o.length, o.width = 20.0, 2.8
+        trace = Trace(
+            trace_id="t", ego=_ego_trace(),
+            annotation=Annotation(country_code=None, vehicles={1: track, 2: follower}),
+        )
+        predict_forward(track, trace, horizon_s=10.0, step_s=DEFAULT_STEP_S, avoid_collisions=avoid_collisions)
+        return [o for o in track.observations if o.synthetic]
+
+    guarded, unguarded = predicted(True), predicted(False)
+    # Compared against the ungoverned run rather than a step count computed
+    # here, since the horizon this vehicle actually gets depends on
+    # REAR_HORIZON_MULTIPLIER (it is itself behind the ego).
+    assert len(guarded) == len(unguarded), "a tailgater must not truncate the leader"
+    # ...and it never slowed for it either: every step covers the same
+    # ground as the ungoverned one.
+    for a, b in zip(guarded, unguarded):
+        assert abs(a.x_m - b.x_m) < 1e-9
+
+
+def test_predicted_vehicles_are_stepped_against_each_others_live_positions():
+    """predict_all steps every vehicle in one chronological sweep. The
+    regression: predicting each vehicle's whole path in turn let a vehicle
+    governed early pick its speed against a path that a vehicle governed
+    later then replaced, so the two ended up overlapping even though both
+    were governed. This is the sample1 vehicle-1-vs-vehicle-4 case,
+    reduced: a long truck with an early anchor closing on a long truck
+    whose own prediction starts later and stops sooner.
+    """
+    import math
+
+    from trace_fixer.geo.collision import obb_overlap
+    from trace_fixer.prediction.extrapolate import predict_all
+
+    ego = _ego_trace()
+
+    def truck(obj_id, times, x0, speed, length):
+        obs = [_obs(t, 100 + i, x_rel=-20.0, x_m=x0 + speed * (t - times[0])) for i, t in enumerate(times)]
+        for o in obs:
+            o.length, o.width = length, 2.8
+        return VehicleTrack(obj_id=obj_id, obj_type="Truck", reflecting_parts=None, observations=obs)
+
+    # Chaser is faster and starts predicting ~9 s earlier than the leader,
+    # so a per-vehicle pass would decide its whole path before the leader
+    # had settled on its own.
+    chaser = truck(1, [24.0, 25.0, 26.0], 1000.0, 30.0, 19.8)
+    leader = truck(4, [33.0, 34.0, 35.0], 1180.0, 24.0, 21.5)
+    trace = Trace(
+        trace_id="t", ego=ego,
+        annotation=Annotation(country_code=None, vehicles={1: chaser, 4: leader}),
+    )
+    predict_all(trace, horizon_s=6.0)
+
+    a = trace.annotation.vehicles[1].observations
+    b = {o.t_us: o for o in trace.annotation.vehicles[4].observations}
+    b_times = sorted(b)
+    tolerance_us = 300_000  # same window validation/checks.py compares over
+    for oa in a:
+        near = [t for t in b_times if abs(t - oa.t_us) <= tolerance_us]
+        for t in near:
+            ob = b[t]
+            assert not obb_overlap(
+                oa.x_m, oa.y_m, oa.heading_deg, oa.length, oa.width,
+                ob.x_m, ob.y_m, ob.heading_deg, ob.length, ob.width,
+            ), f"predicted boxes overlap at t={oa.t_us / 1e6:.2f}s"
+
+
+def test_sample1_prediction_introduces_no_collisions_at_any_horizon():
+    """The reported bug, end to end: on sample1, vehicles 1 and 4 collided
+    in their predictions at horizons of 6 s and above."""
+    from pathlib import Path
+
+    from trace_fixer.prediction.extrapolate import predict_all
+    from trace_fixer.scene import load_trace
+    from trace_fixer.validation.checks import run_validation
+
+    sample1 = Path(__file__).resolve().parents[1] / "data" / "traces" / "sample1"
+    for horizon_s in (4.0, 6.0, 10.0, 15.0):
+        trace = load_trace("sample1", sample1 / "adma.csv", sample1 / "annotation.xml")
+        assert run_validation(trace) == [], "sample1 is clean before prediction"
+        predict_all(trace, horizon_s=horizon_s)
+        collisions = [i for i in run_validation(trace) if i.category == "collision"]
+        assert collisions == [], f"horizon {horizon_s}s: {[i.description for i in collisions]}"
+
+
+def test_the_governor_removes_collisions_without_adding_kinematic_issues():
+    """sample2 is the busy one -- 29+ predicted collisions ungoverned. The
+    governor has to clear them by braking plausibly, not by braking so hard
+    it trades one category of issue for another."""
+    from collections import Counter
+    from pathlib import Path
+
+    from trace_fixer.prediction.extrapolate import predict_all
+    from trace_fixer.scene import load_trace
+    from trace_fixer.validation.checks import run_validation
+
+    sample2 = Path(__file__).resolve().parents[1] / "data" / "traces" / "sample2"
+
+    def counts(avoid_collisions):
+        trace = load_trace("sample2", sample2 / "adma.csv", sample2 / "annotation.xml")
+        run_validation(trace)
+        predict_all(trace, horizon_s=10.0, avoid_collisions=avoid_collisions)
+        return Counter(i.category for i in run_validation(trace))
+
+    ungoverned = counts(False)
+    governed = counts(True)
+    assert ungoverned["collision"] > 0, "fixture must still have collisions to clear"
+    assert governed["collision"] == 0
+    # braking stays under the validator's own "unrealistic acceleration"
+    # threshold, so clearing the collisions costs nothing elsewhere
+    assert governed["kinematic"] <= ungoverned["kinematic"]

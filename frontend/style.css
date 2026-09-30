@@ -30,21 +30,26 @@
   --accent-rgb: 147, 173, 188;
   --accent-glow: rgba(147, 173, 188, 0.28);
   --accent-gradient: linear-gradient(135deg, #4e6b7c 0%, #93adbc 100%);
-  /* Severity stays outside the brand ramp on purpose: these encode meaning,
-     and a reviewer has to be able to tell "high" from "low" at a glance,
-     which three tints of one hue cannot do. */
-  --high: #ff6b73;
+  /* Everything from here down is OUTSIDE the brand ramp on purpose.
+
+     Severity encodes meaning: a reviewer has to tell "high" from "low" at
+     a glance, which three tints of one hue cannot do.
+
+     The rest mirror what the viewport canvas draws (see COLORS in app.js) --
+     they exist here only so the legend swatches match the scene. The brand
+     palette stops at the edge of the canvas: a data colour's job is to stay
+     apart from the other data colours, not to match the chrome. */
+  --high: #ff5f6d;
   --medium: #ffb84d;
   --low: #7fd4ff;
   --good: #6ee7a8;
-  --ego-color: #93adbc;
+  --ego-color: #4da3ff;
   --vehicle-color: #6ee7a8;
   --predicted-color: #b98cf2;
   --flagged-color: #ff5f6d;
   /* Deliberately not one of the four trajectory colours above: the
-     pre-fix overlay is a reference, not another class of vehicle. Dimmer
-     than the ego it now shares a hue family with, so a ghost recedes. */
-  --original-color: #6f7a84;
+     pre-fix overlay is a reference, not another class of vehicle. */
+  --original-color: #9aa5b8;
   /* Road furniture, held apart from the trajectory palette so a road edge
      is never mistaken for a vehicle of some kind. */
   --lane-color: #4a5568;
@@ -598,8 +603,8 @@ body {
   /* A faint radial wash keeps the canvas from reading as a flat void when
      a trace is short and most of the frame is empty road. */
   background:
-    radial-gradient(ellipse 80% 60% at 50% 40%, rgba(var(--accent-rgb), 0.05), transparent 70%),
-    #080b0d;
+    radial-gradient(ellipse 80% 60% at 50% 40%, rgba(77, 163, 255, 0.05), transparent 70%),
+    #070a0f;
   display: flex;
   flex-direction: column;
 }

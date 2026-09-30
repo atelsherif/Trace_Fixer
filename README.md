@@ -198,6 +198,10 @@ from a single frame without scrubbing.
      stop cannot open a gap, the prediction **truncates** — stopping
      early is more honest than emitting an observation that puts two
      vehicles in the same place.
+   - **It only brakes for what is in front of it**, and every vehicle is
+     stepped in one shared chronological sweep. Both of these are
+     load-bearing — see *Why a governed prediction could still collide*
+     below.
 
    **Avoid predicted collisions** (checked by default) makes a predicted
    vehicle brake — down to a full stop if needed, never swerve — rather
@@ -206,13 +210,9 @@ from a single frame without scrubbing.
    `prediction/extrapolate.py` for the braking/recovery rates, both kept
    well under the validator's own "unrealistic acceleration" threshold so
    the governor's own braking never introduces a *new* kinematic issue.
-   It runs `predict_all` in two passes: an ungoverned first pass gives
-   every vehicle some full-length predicted path, so the second, governed
-   pass has real data on every *other* vehicle to react to, not just
-   whichever ones happen to be processed earlier in a single pass. A
-   conflict closing faster than realistic braking can resolve still shows
-   up as a collision issue afterward — that's the honest outcome for a
-   speed-only governor with no steering, not a bug.
+   A conflict closing faster than realistic braking can resolve still
+   shows up as a collision issue afterward — that's the honest outcome
+   for a speed-only governor with no steering, not a bug.
    **Original (pre-fix)** on the viewport overlays each vehicle where the
    annotation originally recorded it — a dashed grey outline, its own
    dashed trail over the same trailing window as the live one, and a thin
@@ -645,22 +645,22 @@ ramp downward for surfaces, so the chrome reads as one material rather than
 a set of unrelated greys. Translucent accent washes are written as
 `rgba(var(--accent-rgb), a)` so the accent lives in exactly one place.
 
-Two sets of colours deliberately sit **outside** the brand ramp, because
-they carry meaning rather than identity:
-
-- **Issue severity** (`--high` / `--medium` / `--low` / `--good`). A
-  reviewer has to tell "high" from "low" at a glance, which three tints of
-  one hue cannot do.
-- **Vehicle categories on the canvas** — vehicle / predicted / flagged stay
-  maximally distinguishable from each other. The ego, the ground grid and
-  selection rings do follow the ramp, since those are chrome.
+**The brand palette stops at the edge of the canvas.** Everything the
+viewport draws — ego, vehicles, predictions, flagged boxes, the pre-fix
+ghost, lane markings, road edges, the ground grid — encodes data, and a
+data colour's job is to stay apart from the *other* data colours, not to
+match the chrome. Re-theming those would make the scene harder to read to
+make it look tidier, which is the wrong trade. Issue severity (`--high` /
+`--medium` / `--low` / `--good`) sits outside the ramp for the same reason:
+a reviewer has to tell "high" from "low" at a glance, which three tints of
+one hue cannot do.
 
 A 2D canvas context can't read a CSS custom property, so the canvas colours
-live in a `COLORS` object at the top of `frontend/app.js`, named to match
-the custom properties in `style.css`. The two have to be changed together —
-that's the price of having no build step, and keeping them in one block
-each is what keeps it to one edit rather than a hunt through the draw
-functions.
+live in a `COLORS` object at the top of `frontend/app.js`. `style.css`
+mirrors them as custom properties purely so the legend swatches match the
+scene — the two have to be changed together, which is the price of having
+no build step, and keeping them in one block each is what keeps it to one
+edit rather than a hunt through the draw functions.
 
 ## Coordinate & unit conventions
 
@@ -724,6 +724,54 @@ and explainable rules are what an annotation QA team can act on directly.
 | Road departure | Vehicle *leaves* the ego's road — an exit ramp, a turn into a side street | No — reported for review and left exactly as recorded (see below) |
 | Collision (vehicle↔ego) | Bounding boxes overlap | Trailing overlaps (track ends inside the ego box — a common "lost track as it merged" artifact) are trimmed. Mid-track overlaps are flagged only |
 | Collision (vehicle↔vehicle) | Bounding boxes overlap | Flagged only (no auto-fix — resolving which of two vehicles is "wrong" isn't well-defined without more context, including between two independently-predicted pre-FOV segments) |
+
+### Why a governed prediction could still collide
+
+The following-distance governor was in place, on by default, and two
+predicted trucks on `sample1` still overlapped — vehicles 1 and 4, at
+t≈40 s, at any horizon of 6 s or more. Two separate faults, which happened
+to compound:
+
+**The governor braked for traffic behind it.** Vehicle 4 truncated its
+prediction because vehicle 1 was 21.2 m *behind* it. Two ~20 m trucks plus
+a 1 m safety margin on each side overlap at that range, so vehicle 4
+braked for its own tailgater — which is backwards. Slowing down can only
+ever open a gap to something *ahead*; braking for a follower closes the
+gap to it, and no amount of braking will ever clear it. So vehicle 4 kept
+braking, never got clear, and stopped predicting altogether.
+
+The fix is to skip any conflict whose centre is not ahead along the step
+direction. Of any pair, keeping the distance is the follower's job, and
+the follower still does it.
+
+**Each vehicle was predicted to completion before the next one started.**
+`predict_all` used to run an ungoverned warm-up pass so the governed pass
+had *something* to look at for every vehicle, then govern each vehicle in
+turn. But governing vehicle 1 read vehicle 4's warm-up path (running out
+to t≈53 s), and governing vehicle 4 afterwards replaced it with one that
+stopped at t≈39.8 s. Vehicle 1 had planned its speed around a gap that no
+longer existed.
+
+The fix is to step every vehicle in one shared chronological sweep per
+direction: repeatedly advance whichever predictor's next step lands
+earliest. A step at time *t* then always sees every other vehicle's
+already-decided position at *t*, because no other predictor can be behind
+it. That also makes the warm-up pass unnecessary — it existed only to
+paper over the ordering problem — so it's gone.
+
+Both are load-bearing; `tests/test_extrapolate.py` covers each separately,
+and reverting either one alone re-breaks the sample.
+
+Result, with the governor on: zero predicted collisions on `sample1` and
+`sample2` at horizons of 4, 6, 10 and 15 s. On `sample2` that is 29–33
+collisions cleared, with no increase in kinematic issues — the braking
+rates stay under the validator's own threshold, so nothing is traded.
+
+One thing this does *not* fix, and shouldn't be mistaken for it: a
+prediction still adds ~10 kinematic flags on `sample2` at the seam between
+a track's last real observation and its first predicted one, governed or
+not. That's the constant-speed extrapolation meeting a decelerating
+vehicle, not the governor.
 
 ### Off-road vs. road departure
 

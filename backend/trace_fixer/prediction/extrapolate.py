@@ -35,10 +35,34 @@ down (to a full stop) or recovers speed once clear, and never changes
 heading to steer around a conflict. A conflict closing faster than
 realistic braking can resolve therefore still surfaces as a collision --
 the honest outcome for a speed-only model, not something to paper over.
+
+Two properties make that governor actually work, both learned the hard
+way from predictions that collided anyway:
+
+*It only brakes for what is in front of it.* Slowing down can only ever
+open a gap to something ahead in the direction of travel; braking for a
+vehicle behind closes the gap to it. Reacting to conflicts on both sides
+had two trucks each brake for the other, and the one in front stop
+predicting altogether because no amount of braking could clear a
+tailgater. Of any pair, it is the follower's job to keep the distance --
+so a conflict whose centre is not ahead along the step direction is
+skipped, and never truncates a prediction either.
+
+*Every vehicle is stepped in one shared chronological sweep*, not one
+vehicle at a time. Predicting each vehicle's whole path to the end before
+starting the next means the vehicles predicted early chose their speeds
+against paths that the vehicles predicted later then replaced --
+committing to a gap behind a truck that subsequently braked into it. In a
+chronological sweep, a step at time t always sees every other vehicle's
+already-decided position at t, because every other predictor has been
+advanced at least that far. That is also why no warm-up pass is needed to
+give the governor something to look at.
 """
 from __future__ import annotations
 
 import bisect
+import heapq
+import itertools
 import math
 
 from trace_fixer.geo.collision import obb_overlap
@@ -122,157 +146,234 @@ def _initial_speed_heading(anchor: VehicleObs, neighbor: VehicleObs) -> tuple[fl
     return speed, heading
 
 
-class _ConflictBoxFinder:
-    """Ego + every other vehicle's box at a given instant, for the
-    collision-avoiding speed governor in `_extrapolate` below. Built once
-    per predict_backward/predict_forward call (not per step): each other
-    track's observation times are sorted once so a per-step lookup is a
-    bisect rather than a linear scan over its whole history.
+class _SceneBoxes:
+    """Where everything in the scene is at a given instant -- the ego plus
+    every vehicle's box -- for the collision-avoiding speed governor below.
 
-    Only observations already present on a track when this is built are
-    visible -- for a track processed earlier in the same `predict_all`
-    call, that includes whatever it already predicted, so predicting
-    vehicle B after vehicle A lets B react to A's (already-decided)
-    predicted path, not just its real one.
+    Each track's observation times are sorted once, so a per-step lookup is
+    a bisect rather than a linear scan over its whole history. Unlike the
+    per-call snapshot this replaced, it is **live**: `record` folds each
+    newly predicted observation in as it is decided, so a vehicle stepping
+    at time t sees every other vehicle's position at t, including positions
+    predicted moments ago in the same sweep. That is what makes a
+    chronological sweep across all vehicles mean anything.
     """
 
-    def __init__(self, trace: Trace, ego_interp: EgoInterpolator, exclude_obj_id: int):
+    def __init__(self, trace: Trace, ego_interp: EgoInterpolator):
         self._trace = trace
         self._ego_interp = ego_interp
-        self._others: list[tuple[list[int], dict[int, VehicleObs]]] = []
+        # obj_id -> (sorted times, observations parallel to them)
+        self._by_id: dict[int, tuple[list[int], list[VehicleObs]]] = {}
         for obj_id, track in trace.annotation.vehicles.items():
-            if obj_id == exclude_obj_id or not track.observations:
-                continue
-            by_t = {o.t_us: o for o in track.observations}
-            self._others.append((sorted(by_t), by_t))
+            ordered = sorted(track.observations, key=lambda o: o.t_us)
+            self._by_id[obj_id] = ([o.t_us for o in ordered], ordered)
 
-    def boxes_at(self, t_cursor: int) -> list[tuple[float, float, float, float, float]]:
+    def record(self, obj_id: int, obs: VehicleObs) -> None:
+        times, entries = self._by_id.setdefault(obj_id, ([], []))
+        i = bisect.bisect_left(times, obs.t_us)
+        times.insert(i, obs.t_us)
+        entries.insert(i, obs)
+
+    def forget_predictions(self, obj_id: int) -> None:
+        """Drops a track's synthetic observations, so re-predicting it does
+        not have it dodge the path it is about to throw away."""
+        times, entries = self._by_id.get(obj_id, ([], []))
+        kept = [o for o in entries if not o.synthetic]
+        self._by_id[obj_id] = ([o.t_us for o in kept], kept)
+
+    def boxes_at(self, t_cursor: int, exclude_obj_id: int) -> list[tuple[float, float, float, float, float]]:
         t_ego_us = apply_offset(t_cursor, self._trace.sync_offset_us)
         ex, ey, eyaw, _ = self._ego_interp.at(t_ego_us)
         boxes = [(ex, ey, math.degrees(eyaw), EGO_LENGTH_M, EGO_WIDTH_M)]
-        for times, by_t in self._others:
-            idx = bisect.bisect_left(times, t_cursor)
-            candidates = times[max(0, idx - 1) : idx + 1]
-            if not candidates:
+        for obj_id, (times, entries) in self._by_id.items():
+            if obj_id == exclude_obj_id or not times:
                 continue
-            nearest_t = min(candidates, key=lambda t: abs(t - t_cursor))
-            if abs(nearest_t - t_cursor) <= CONFLICT_TIME_TOLERANCE_US:
-                o = by_t[nearest_t]
+            idx = bisect.bisect_left(times, t_cursor)
+            candidates = range(max(0, idx - 1), min(len(times), idx + 1))
+            nearest = min(candidates, key=lambda i: abs(times[i] - t_cursor), default=None)
+            if nearest is None:
+                continue
+            if abs(times[nearest] - t_cursor) <= CONFLICT_TIME_TOLERANCE_US:
+                o = entries[nearest]
                 boxes.append((o.x_m, o.y_m, o.heading_deg, o.length, o.width))
         return boxes
 
 
-def _extrapolate(
-    anchor: VehicleObs,
-    trace: Trace,
-    interp: EgoInterpolator,
-    speed: float,
-    heading: float,
-    direction: int,
-    horizon_s: float,
-    step_s: float,
-    time_bound_us: int,
-    horizon_m: float | None = None,
-    conflicts: _ConflictBoxFinder | None = None,
-) -> list[VehicleObs]:
-    """Steps away from `anchor` in time by `direction` (+1 forward, -1
-    backward) for up to horizon_s (and, if given, no further than
-    horizon_m of distance travelled -- whichever limit is hit first),
-    stopping at time_bound_us (the ego trace's start/end). Returned list
-    is in the order generated, i.e. chronological for direction=+1 and
+class _Extrapolator:
+    """One vehicle's prediction in one direction, advanced one step at a
+    time so several can be interleaved in a shared chronological sweep
+    (see `predict_all`). Running it straight to the end -- `run()` -- is
+    exactly the old whole-path-at-once behaviour.
+
+    Steps away from `anchor` in time by `direction` (+1 forward, -1
+    backward) for up to horizon_s (and, if given, no further than horizon_m
+    of distance travelled -- whichever limit is hit first), stopping at
+    time_bound_us (the ego trace's start/end). `out` accumulates in the
+    order generated, i.e. chronological for direction=+1 and
     reverse-chronological for -1.
 
-    When `conflicts` is given, each step first checks whether the
-    vehicle's box at the resulting position would overlap the ego or
-    another vehicle's box (grown by COLLISION_SAFETY_MARGIN_M) at that
-    same instant. If so, the step is retaken at a braked speed instead
-    of simply accepting an overlap -- see the module docstring: this is a
-    following-distance governor, not a maneuver, so the vehicle only ever
-    slows down (down to a full stop) or speeds back up once clear; it
-    never changes heading to steer around a conflict.
+    When `scene` is given, each step first checks whether the vehicle's box
+    at the resulting position would overlap the ego or another vehicle's
+    box (grown by COLLISION_SAFETY_MARGIN_M) at that same instant. If so,
+    the step is retaken at a braked speed instead of simply accepting an
+    overlap -- see the module docstring: a following-distance governor, not
+    a maneuver, so the vehicle only ever slows down (down to a full stop)
+    or speeds back up once clear, never steers around a conflict, and only
+    ever reacts to what is ahead of it.
     """
-    step_us = int(step_s * 1e6) * direction
-    # An integer step count rather than accumulating `elapsed += step_s`:
-    # floating-point drift on the latter occasionally added (or dropped)
-    # one extra step right at the horizon boundary, most visibly once
-    # horizon_s/step_s lands on an exact multiple (e.g. 12.0/0.2).
-    total_steps = round(horizon_s / step_s)
-    if horizon_m is not None and speed > 1e-6:
-        total_steps = min(total_steps, math.floor(horizon_m / (speed * step_s)))
-    x, y = anchor.x_m, anchor.y_m
-    t_cursor = anchor.t_us + step_us
-    current_speed = speed
-    distance_travelled = 0.0
-    synthetic: list[VehicleObs] = []
-    for _ in range(total_steps):
-        if not (t_cursor < time_bound_us if direction > 0 else t_cursor > time_bound_us):
-            break
-        tangent = _nearest_path_tangent(trace.ego, x, y)
-        heading = heading + STEER_BLEND * _wrap_rad(tangent - heading)
 
-        def _step_to(v: float) -> tuple[float, float]:
-            return x + direction * math.cos(heading) * v * step_s, y + direction * math.sin(heading) * v * step_s
+    def __init__(
+        self,
+        anchor: VehicleObs,
+        obj_id: int,
+        trace: Trace,
+        interp: EgoInterpolator,
+        speed: float,
+        heading: float,
+        direction: int,
+        horizon_s: float,
+        step_s: float,
+        time_bound_us: int,
+        horizon_m: float | None = None,
+        scene: _SceneBoxes | None = None,
+    ):
+        self.anchor = anchor
+        self.obj_id = obj_id
+        self.direction = direction
+        self.out: list[VehicleObs] = []
+        self._trace = trace
+        self._interp = interp
+        self._scene = scene
+        self._step_s = step_s
+        self._step_us = int(step_s * 1e6) * direction
+        self._horizon_m = horizon_m
+        self._time_bound_us = time_bound_us
+        self._cruise_speed = speed
+        self._speed = speed
+        self._heading = heading
+        self._x, self._y = anchor.x_m, anchor.y_m
+        self._distance = 0.0
+        self._t_cursor = anchor.t_us + self._step_us
+        # An integer step count rather than accumulating `elapsed += step_s`:
+        # floating-point drift on the latter occasionally added (or dropped)
+        # one extra step right at the horizon boundary, most visibly once
+        # horizon_s/step_s lands on an exact multiple (e.g. 12.0/0.2).
+        self._steps_left = round(horizon_s / step_s)
+        if horizon_m is not None and speed > 1e-6:
+            self._steps_left = min(self._steps_left, math.floor(horizon_m / (speed * step_s)))
+        self.done = self._steps_left <= 0
 
-        if conflicts is not None:
-            boxes = conflicts.boxes_at(t_cursor)
-            grown_length = anchor.length + 2 * COLLISION_SAFETY_MARGIN_M
-            grown_width = anchor.width + 2 * COLLISION_SAFETY_MARGIN_M
+    def next_time_us(self) -> int | None:
+        """When this predictor's next step lands, or None once finished."""
+        return None if self.done else self._t_cursor
 
-            def _blocked(px: float, py: float, length: float, width: float) -> bool:
-                return any(
-                    obb_overlap(px, py, math.degrees(heading), length, width, *box) for box in boxes
-                )
+    def _step_to(self, v: float) -> tuple[float, float]:
+        return (
+            self._x + self.direction * math.cos(self._heading) * v * self._step_s,
+            self._y + self.direction * math.sin(self._heading) * v * self._step_s,
+        )
 
-            cand_x, cand_y = _step_to(current_speed)
-            if _blocked(cand_x, cand_y, grown_length, grown_width):
-                current_speed = max(0.0, current_speed - COLLISION_BRAKE_MPS2 * step_s)
-                cand_x, cand_y = _step_to(current_speed)
+    def _blocking(self, px: float, py: float, length: float, width: float, boxes) -> bool:
+        """Whether a box the vehicle is *closing on* would overlap.
+
+        Conflicts that are not ahead along the step direction are ignored
+        on purpose: braking moves the vehicle backwards relative to
+        everything, so it can only ever open a gap to something in front.
+        Braking for a vehicle behind closes the gap to it, and used to make
+        the leader of a pair of trucks stop predicting entirely because no
+        amount of braking could clear its own tailgater. Keeping the
+        distance is the follower's job, and the follower still does it.
+        """
+        fx = self.direction * math.cos(self._heading)
+        fy = self.direction * math.sin(self._heading)
+        heading_deg = math.degrees(self._heading)
+        for box in boxes:
+            if (box[0] - px) * fx + (box[1] - py) * fy <= 0:
+                continue
+            if obb_overlap(px, py, heading_deg, length, width, *box):
+                return True
+        return False
+
+    def step(self) -> VehicleObs | None:
+        """Advances exactly one step. Returns the observation produced, or
+        None if this step ended the prediction (horizon, clip bound, or an
+        unavoidable conflict)."""
+        if self.done:
+            return None
+        in_bounds = (
+            self._t_cursor < self._time_bound_us
+            if self.direction > 0
+            else self._t_cursor > self._time_bound_us
+        )
+        if not in_bounds:
+            self.done = True
+            return None
+
+        tangent = _nearest_path_tangent(self._trace.ego, self._x, self._y)
+        self._heading = self._heading + STEER_BLEND * _wrap_rad(tangent - self._heading)
+
+        if self._scene is not None:
+            boxes = self._scene.boxes_at(self._t_cursor, self.obj_id)
+            grown_length = self.anchor.length + 2 * COLLISION_SAFETY_MARGIN_M
+            grown_width = self.anchor.width + 2 * COLLISION_SAFETY_MARGIN_M
+
+            cand_x, cand_y = self._step_to(self._speed)
+            if self._blocking(cand_x, cand_y, grown_length, grown_width, boxes):
+                self._speed = max(0.0, self._speed - COLLISION_BRAKE_MPS2 * self._step_s)
+                cand_x, cand_y = self._step_to(self._speed)
                 # Braking is rate-limited to stay physically plausible, so
                 # it cannot always open a gap in one step. If the vehicle's
                 # *actual* box (not the safety-margin one) would still
-                # overlap even after braking, the honest answer is that
-                # there is no plausible continuation from here -- stop
-                # predicting rather than emit an observation known to put
-                # two vehicles in the same place.
-                if _blocked(cand_x, cand_y, anchor.length, anchor.width):
-                    break
+                # overlap something ahead even after braking, the honest
+                # answer is that there is no plausible continuation from
+                # here -- stop predicting rather than emit an observation
+                # known to put two vehicles in the same place.
+                if self._blocking(cand_x, cand_y, self.anchor.length, self.anchor.width, boxes):
+                    self.done = True
+                    return None
             else:
-                current_speed = min(speed, current_speed + COLLISION_RECOVERY_MPS2 * step_s)
-            x, y = cand_x, cand_y
+                self._speed = min(self._cruise_speed, self._speed + COLLISION_RECOVERY_MPS2 * self._step_s)
+            self._x, self._y = cand_x, cand_y
         else:
-            x, y = _step_to(current_speed)
+            self._x, self._y = self._step_to(self._speed)
 
-        distance_travelled += abs(current_speed) * step_s
-        t_ego_us = apply_offset(t_cursor, trace.sync_offset_us)
-        ex, ey, eyaw, _ = interp.at(t_ego_us)
-        x_rel, y_rel = global_to_ego_relative(x, y, ex, ey, eyaw)
-        zrot = global_heading_to_zrot(heading, eyaw)
+        self._distance += abs(self._speed) * self._step_s
+        t_ego_us = apply_offset(self._t_cursor, self._trace.sync_offset_us)
+        ex, ey, eyaw, _ = self._interp.at(t_ego_us)
+        x_rel, y_rel = global_to_ego_relative(self._x, self._y, ex, ey, eyaw)
 
-        synthetic.append(
-            VehicleObs(
-                t_us=t_cursor,
-                frame=-1,
-                obj_movement=anchor.obj_movement,
-                obj_lane=anchor.obj_lane,
-                obj_confidence="Predicted",
-                x_rel=x_rel,
-                y_rel=y_rel,
-                z_rel=anchor.z_rel,
-                length=anchor.length,
-                width=anchor.width,
-                height=anchor.height,
-                zrot=zrot,
-                x_m=x,
-                y_m=y,
-                heading_deg=math.degrees(heading) % 360,
-                synthetic=True,
-            )
+        obs = VehicleObs(
+            t_us=self._t_cursor,
+            frame=-1,
+            obj_movement=self.anchor.obj_movement,
+            obj_lane=self.anchor.obj_lane,
+            obj_confidence="Predicted",
+            x_rel=x_rel,
+            y_rel=y_rel,
+            z_rel=self.anchor.z_rel,
+            length=self.anchor.length,
+            width=self.anchor.width,
+            height=self.anchor.height,
+            zrot=global_heading_to_zrot(self._heading, eyaw),
+            x_m=self._x,
+            y_m=self._y,
+            heading_deg=math.degrees(self._heading) % 360,
+            synthetic=True,
         )
-        t_cursor += step_us
-        if horizon_m is not None and distance_travelled >= horizon_m:
-            break
+        self.out.append(obs)
+        if self._scene is not None:
+            self._scene.record(self.obj_id, obs)
 
-    return synthetic
+        self._t_cursor += self._step_us
+        self._steps_left -= 1
+        if self._steps_left <= 0 or (self._horizon_m is not None and self._distance >= self._horizon_m):
+            self.done = True
+        return obs
+
+    def run(self) -> list[VehicleObs]:
+        while not self.done:
+            self.step()
+        return self.out
 
 
 # --- Track continuation detection -------------------------------------
@@ -357,6 +458,83 @@ def _total_frames(trace: Trace) -> int | None:
     return max(m.frame for m in trace.annotation.frame_meta)
 
 
+def _plan_backward(
+    track: VehicleTrack,
+    trace: Trace,
+    interp: EgoInterpolator,
+    horizon_s: float,
+    step_s: float,
+    horizon_m: float | None,
+    scene: _SceneBoxes | None,
+    time_bound_us: int | None,
+) -> _Extrapolator | None:
+    """The pre-FOV prediction this track needs, ready to step, or None when
+    it has nothing missing at the front (already visible from the clip's
+    first frames, or no real observations at all)."""
+    real_obs = [o for o in track.observations if not o.synthetic]
+    if not real_obs:
+        return None
+    first = real_obs[0]
+    if first.frame <= EDGE_FRAME_MARGIN:
+        return None
+    if len(real_obs) >= 2:
+        speed, heading = _initial_speed_heading(first, real_obs[1])
+    else:
+        speed, heading = 25.0, math.radians(first.heading_deg)  # fallback: typical highway speed
+    return _Extrapolator(
+        first, track.obj_id, trace, interp, speed, heading, direction=-1,
+        horizon_s=_effective_horizon(first, horizon_s), step_s=step_s,
+        time_bound_us=max(trace.ego.t0_us, time_bound_us) if time_bound_us is not None else trace.ego.t0_us,
+        horizon_m=_effective_horizon(first, horizon_m), scene=scene,
+    )
+
+
+def _plan_forward(
+    track: VehicleTrack,
+    trace: Trace,
+    interp: EgoInterpolator,
+    horizon_s: float,
+    step_s: float,
+    horizon_m: float | None,
+    scene: _SceneBoxes | None,
+    time_bound_us: int | None,
+) -> _Extrapolator | None:
+    """The post-FOV prediction this track needs, ready to step, or None
+    when its track already runs to the end of the clip."""
+    real_obs = [o for o in track.observations if not o.synthetic]
+    if not real_obs:
+        return None
+    last = real_obs[-1]
+    total_frames = _total_frames(trace)
+    if total_frames is not None and last.frame >= total_frames - EDGE_FRAME_MARGIN:
+        return None
+    if len(real_obs) >= 2:
+        speed, heading = _initial_speed_heading(real_obs[-2], last)
+    else:
+        speed, heading = 25.0, math.radians(last.heading_deg)
+    return _Extrapolator(
+        last, track.obj_id, trace, interp, speed, heading, direction=1,
+        horizon_s=_effective_horizon(last, horizon_s), step_s=step_s,
+        time_bound_us=min(trace.ego.t1_us, time_bound_us) if time_bound_us is not None else trace.ego.t1_us,
+        horizon_m=_effective_horizon(last, horizon_m), scene=scene,
+    )
+
+
+def _commit_backward(track: VehicleTrack, anchor: VehicleObs, produced: list[VehicleObs]) -> int:
+    ordered = list(reversed(produced))  # generated newest-first, stored in time order
+    track.observations = ordered + [
+        o for o in track.observations if not (o.synthetic and o.t_us < anchor.t_us)
+    ]
+    return len(ordered)
+
+
+def _commit_forward(track: VehicleTrack, anchor: VehicleObs, produced: list[VehicleObs]) -> int:
+    track.observations = [
+        o for o in track.observations if not (o.synthetic and o.t_us > anchor.t_us)
+    ] + produced
+    return len(produced)
+
+
 def predict_backward(
     track: VehicleTrack,
     trace: Trace,
@@ -373,33 +551,19 @@ def predict_backward(
     `horizon_m`, if given, caps predicted *distance* in addition to
     `horizon_s`'s time cap -- whichever limit is reached first stops the
     prediction. `avoid_collisions` runs the following-distance speed
-    governor described on `_extrapolate`; every other vehicle track
-    already predicted earlier in the same `predict_all` call is visible
-    to it, but tracks predicted later are not (see `_ConflictBoxFinder`).
+    governor described on `_Extrapolator`, against the scene as it stands
+    now. Predicting one track at a time this way means it can only react
+    to what is already on the other tracks; `predict_all` steps every
+    vehicle together instead, which is what lets them react to each other.
     """
-    real_obs = [o for o in track.observations if not o.synthetic]
-    if not real_obs:
-        return 0
-    first = real_obs[0]
-    if first.frame <= EDGE_FRAME_MARGIN:
-        return 0
-
-    if len(real_obs) >= 2:
-        speed, heading = _initial_speed_heading(first, real_obs[1])
-    else:
-        speed, heading = 25.0, math.radians(first.heading_deg)  # fallback: typical highway speed
-
     interp = EgoInterpolator(trace.ego)
-    conflicts = _ConflictBoxFinder(trace, interp, track.obj_id) if avoid_collisions else None
-    synthetic = _extrapolate(
-        first, trace, interp, speed, heading, direction=-1,
-        horizon_s=_effective_horizon(first, horizon_s), step_s=step_s,
-        time_bound_us=max(trace.ego.t0_us, time_bound_us) if time_bound_us is not None else trace.ego.t0_us,
-        horizon_m=_effective_horizon(first, horizon_m), conflicts=conflicts,
-    )
-    synthetic.reverse()
-    track.observations = synthetic + [o for o in track.observations if not (o.synthetic and o.t_us < first.t_us)]
-    return len(synthetic)
+    scene = _SceneBoxes(trace, interp) if avoid_collisions else None
+    if scene is not None:
+        scene.forget_predictions(track.obj_id)
+    plan = _plan_backward(track, trace, interp, horizon_s, step_s, horizon_m, scene, time_bound_us)
+    if plan is None:
+        return 0
+    return _commit_backward(track, plan.anchor, plan.run())
 
 
 def predict_forward(
@@ -417,29 +581,45 @@ def predict_forward(
     Returns the number of synthetic observations added. See
     `predict_backward` for `horizon_m`/`avoid_collisions`.
     """
-    real_obs = [o for o in track.observations if not o.synthetic]
-    if not real_obs:
-        return 0
-    last = real_obs[-1]
-    total_frames = _total_frames(trace)
-    if total_frames is not None and last.frame >= total_frames - EDGE_FRAME_MARGIN:
-        return 0
-
-    if len(real_obs) >= 2:
-        speed, heading = _initial_speed_heading(real_obs[-2], last)
-    else:
-        speed, heading = 25.0, math.radians(last.heading_deg)
-
     interp = EgoInterpolator(trace.ego)
-    conflicts = _ConflictBoxFinder(trace, interp, track.obj_id) if avoid_collisions else None
-    synthetic = _extrapolate(
-        last, trace, interp, speed, heading, direction=1,
-        horizon_s=_effective_horizon(last, horizon_s), step_s=step_s,
-        time_bound_us=min(trace.ego.t1_us, time_bound_us) if time_bound_us is not None else trace.ego.t1_us,
-        horizon_m=_effective_horizon(last, horizon_m), conflicts=conflicts,
-    )
-    track.observations = [o for o in track.observations if not (o.synthetic and o.t_us > last.t_us)] + synthetic
-    return len(synthetic)
+    scene = _SceneBoxes(trace, interp) if avoid_collisions else None
+    if scene is not None:
+        scene.forget_predictions(track.obj_id)
+    plan = _plan_forward(track, trace, interp, horizon_s, step_s, horizon_m, scene, time_bound_us)
+    if plan is None:
+        return 0
+    return _commit_forward(track, plan.anchor, plan.run())
+
+
+def _sweep(plans: list[_Extrapolator], direction: int) -> None:
+    """Advances every predictor in `plans` in shared chronological order:
+    repeatedly step whichever one's next step lands earliest (latest, when
+    sweeping backwards through time).
+
+    This is the whole point of the exercise. Running each vehicle's
+    prediction to completion before starting the next lets a vehicle commit
+    to a gap behind another vehicle whose path is then replaced -- which is
+    how two predicted trucks ended up overlapping despite both being
+    governed. Stepping in time order means a step at time t always sees
+    every other vehicle's already-decided position at t, because no other
+    predictor can be behind it.
+    """
+    # heapq is a min-heap; sweeping backwards wants the largest timestamp
+    # first, so negate. The counter only breaks ties (an _Extrapolator is
+    # not orderable, and simultaneous steps are common on a shared grid).
+    order = 1 if direction > 0 else -1
+    counter = itertools.count()
+    heap: list[tuple[int, int, _Extrapolator]] = []
+    for plan in plans:
+        t = plan.next_time_us()
+        if t is not None:
+            heapq.heappush(heap, (order * t, next(counter), plan))
+    while heap:
+        _, _, plan = heapq.heappop(heap)
+        plan.step()
+        t = plan.next_time_us()
+        if t is not None:
+            heapq.heappush(heap, (order * t, next(counter), plan))
 
 
 def predict_all(
@@ -462,17 +642,23 @@ def predict_all(
     entirely. Without this, both fill the same gap and the vehicle
     collides with itself.
 
-    When `avoid_collisions` is set, this runs two passes rather than one:
-    a first, ungoverned pass gives every vehicle *some* full-length
-    predicted path, so the second, governed pass's `_ConflictBoxFinder`
-    has real data for every other vehicle to react to -- not just
-    whichever ones happened to be processed earlier in a single pass
-    (predict_backward/predict_forward only ever see tracks already
-    handled earlier in the same call). The second pass's own results
-    replace the first's on every track.
+    Every vehicle is then stepped together in one chronological sweep per
+    direction (see `_sweep`), so each vehicle's governor reacts to where
+    the others actually are at that instant rather than to a path they are
+    about to discard. Backward runs before forward simply because they
+    occupy opposite ends of the clip and the pre-FOV segments, being
+    earlier, are the ones a forward prediction might have to react to.
     """
     continuations = find_track_continuations(trace) if link_continuations else {}
     successors = set(continuations.values())
+    interp = EgoInterpolator(trace.ego)
+    scene = _SceneBoxes(trace, interp) if avoid_collisions else None
+    tracks = list(trace.annotation.vehicles.values())
+    added: dict[int, dict[str, int]] = {}
+
+    def _record(obj_id: int, key: str, n: int) -> None:
+        if n:
+            added.setdefault(obj_id, {})[key] = n
 
     def _forward_bound(track: VehicleTrack) -> int | None:
         """Stop a predecessor's forward prediction where its successor's
@@ -484,33 +670,31 @@ def predict_all(
         successor_obs = [o for o in trace.annotation.vehicles[successor_id].observations if not o.synthetic]
         return successor_obs[0].t_us if successor_obs else None
 
-    def _run(track: VehicleTrack, governed: bool) -> dict[str, int]:
-        entry: dict[str, int] = {}
-        if backward and track.obj_id not in successors:
-            n = predict_backward(
-                track, trace, horizon_s=horizon_s, step_s=step_s, horizon_m=horizon_m,
-                avoid_collisions=governed,
-            )
-            if n:
-                entry["backward"] = n
-        if forward:
-            n = predict_forward(
-                track, trace, horizon_s=horizon_s, step_s=step_s, horizon_m=horizon_m,
-                avoid_collisions=governed, time_bound_us=_forward_bound(track),
-            )
-            if n:
-                entry["forward"] = n
-        return entry
+    if backward:
+        plans = [
+            (track, plan)
+            for track in tracks
+            if track.obj_id not in successors
+            for plan in [_plan_backward(track, trace, interp, horizon_s, step_s, horizon_m, scene, None)]
+            if plan is not None
+        ]
+        _sweep([p for _, p in plans], direction=-1)
+        for track, plan in plans:
+            _record(track.obj_id, "backward", _commit_backward(track, plan.anchor, plan.out))
 
-    if avoid_collisions:
-        for track in trace.annotation.vehicles.values():
-            _run(track, governed=False)
+    if forward:
+        plans = [
+            (track, plan)
+            for track in tracks
+            for plan in [
+                _plan_forward(track, trace, interp, horizon_s, step_s, horizon_m, scene, _forward_bound(track))
+            ]
+            if plan is not None
+        ]
+        _sweep([p for _, p in plans], direction=1)
+        for track, plan in plans:
+            _record(track.obj_id, "forward", _commit_forward(track, plan.anchor, plan.out))
 
-    added: dict[int, dict[str, int]] = {}
-    for track in trace.annotation.vehicles.values():
-        entry = _run(track, governed=avoid_collisions)
-        if entry:
-            added[track.obj_id] = entry
     return added
 
 

@@ -31,30 +31,31 @@ const canvas = () => el("viewport");
 
 /** Canvas colours, kept beside the CSS custom properties of the same names
  * in style.css -- a 2D context can't read a CSS variable, so the two have to
- * be changed together. Anything the theme owns lives here rather than inline,
- * so re-theming is one edit instead of a hunt through the draw functions.
+ * be changed together. Collected here rather than inline in the draw
+ * functions so they can be found and changed in one place.
  *
- * Note which of these are *brand* and which are *data*: the chrome (ego,
- * ground grid, selection) follows the brand ramp, while vehicle / predicted /
- * flagged are categorical encodings and stay maximally distinguishable
- * instead. */
+ * These are deliberately **not** on the app's brand ramp, and the GUI
+ * re-theme left them alone: everything in the viewport encodes data, and
+ * the job of a data colour is to stay apart from the other data colours,
+ * not to match the chrome. The brand palette stops at the edge of the
+ * canvas. */
 const COLORS = {
-  ego: "#93adbc",
-  egoFill: "#93adbc88",
-  egoRoute: "147, 173, 188",   // rgb triple, alpha varies by layer
-  selection: "#c0cfd8",
-  grid: "rgba(147, 173, 188, 0.07)",
+  ego: "#4da3ff",
+  egoFill: "#4da3ff88",
+  egoRoute: "77, 163, 255",   // rgb triple, alpha varies by layer
+  selection: "#4da3ff",
+  grid: "rgba(120, 160, 220, 0.07)",
   vehicle: "#6ee7a8",
   vehicleFill: "#6ee7a855",
   predicted: "#b98cf2",
   predictedFill: "#b98cf233",
-  flagged: "#ff6b73",
-  flaggedFill: "#ff6b7355",
+  flagged: "#ff5f6d",
+  flaggedFill: "#ff5f6d55",
   lane: "#4a5568",
   roadEdge: "#c98a3c",
-  original: "#6f7a84",
-  mapRoads: "#4e6b7c",
-  staticObject: "#58798d",
+  original: "#9aa5b8",
+  mapRoads: "#3d6fa8",
+  staticObject: "#5a6478",
 };
 
 // ---------- API helpers ----------
@@ -618,7 +619,7 @@ function drawEgoRoute(ctx, path, tNow, lineWidthWorld) {
   for (let i = 1; i < path.length; i++) ctx.lineTo(path[i].x, path[i].y);
   ctx.stroke();
 
-  ctx.strokeStyle = `rgba(${COLORS.egoRoute}, 0.6)`;
+  ctx.strokeStyle = `rgba(${COLORS.egoRoute}, 0.55)`;
   ctx.lineWidth = lineWidthWorld * 2;
   ctx.beginPath();
   ctx.moveTo(path[0].x, path[0].y);
