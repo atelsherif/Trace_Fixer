@@ -1,32 +1,50 @@
 :root {
-  /* Surfaces are layered rather than flat: the app sits on the darkest
+  /* The whole interface is one hue ramp, extended from three given brand
+     tones -- #4e6b7c, #93adbc, #e4eaee -- which turn out to be the same
+     colour (h~203, s~23%) at lightness 40 / 66 / 91. Everything below is
+     that ramp continued downward for surfaces, so the chrome reads as one
+     material rather than a set of unrelated greys.
+
+     Surfaces are layered rather than flat: the app sits on the darkest
      ground, panels lift off it, and controls lift off panels again -- so
      depth reads from value alone, before any shadow is drawn. */
-  --bg: #0a0d13;
-  --panel-bg: #12161f;
-  --panel-bg-alt: #1a2029;
-  --surface-hi: #222a36;
-  --border: #262f3d;
-  --border-soft: #1c242f;
-  --text: #eef1f6;
-  --text-dim: #8b97ac;
-  --text-faint: #5c6779;
-  --accent: #4da3ff;
-  --accent-2: #7b6cff;
-  --accent-dim: #23539a;
-  --accent-glow: rgba(77, 163, 255, 0.28);
-  --accent-gradient: linear-gradient(135deg, #4da3ff 0%, #7b6cff 100%);
-  --high: #ff5f6d;
+  --brand-deep: #4e6b7c;   /* given */
+  --brand-mid: #93adbc;    /* given */
+  --brand-pale: #e4eaee;   /* given */
+  --bg: #0d1114;
+  --panel-bg: #131a1e;
+  --panel-bg-alt: #1a2329;
+  --surface-hi: #233038;
+  --surface-hover: #334652;
+  --border: #293842;
+  --border-soft: #1d282f;
+  --border-hi: #3b515e;
+  --text: #e4eaee;
+  --text-dim: #93adbc;
+  --text-faint: #58798d;
+  --accent: #93adbc;
+  --accent-2: #4e6b7c;
+  --accent-dim: #4e6b7c;
+  /* Componentwise, so translucent accent washes can be written as
+     rgba(var(--accent-rgb), a) instead of re-hardcoding the colour. */
+  --accent-rgb: 147, 173, 188;
+  --accent-glow: rgba(147, 173, 188, 0.28);
+  --accent-gradient: linear-gradient(135deg, #4e6b7c 0%, #93adbc 100%);
+  /* Severity stays outside the brand ramp on purpose: these encode meaning,
+     and a reviewer has to be able to tell "high" from "low" at a glance,
+     which three tints of one hue cannot do. */
+  --high: #ff6b73;
   --medium: #ffb84d;
   --low: #7fd4ff;
   --good: #6ee7a8;
-  --ego-color: #4da3ff;
+  --ego-color: #93adbc;
   --vehicle-color: #6ee7a8;
   --predicted-color: #b98cf2;
   --flagged-color: #ff5f6d;
   /* Deliberately not one of the four trajectory colours above: the
-     pre-fix overlay is a reference, not another class of vehicle. */
-  --original-color: #9aa5b8;
+     pre-fix overlay is a reference, not another class of vehicle. Dimmer
+     than the ego it now shares a hue family with, so a ghost recedes. */
+  --original-color: #6f7a84;
   /* Road furniture, held apart from the trajectory palette so a road edge
      is never mistaken for a vehicle of some kind. */
   --lane-color: #4a5568;
@@ -69,7 +87,7 @@ body {
   border: 2px solid transparent;
   background-clip: content-box;
 }
-*::-webkit-scrollbar-thumb:hover { background: #33404f; background-clip: content-box; }
+*::-webkit-scrollbar-thumb:hover { background: var(--surface-hover); background-clip: content-box; }
 
 :focus-visible {
   outline: 2px solid var(--accent);
@@ -83,7 +101,7 @@ body {
   justify-content: space-between;
   gap: 16px;
   padding: 11px 18px;
-  background: linear-gradient(180deg, #151b25 0%, #11151d 100%);
+  background: linear-gradient(180deg, var(--panel-bg-alt) 0%, var(--panel-bg) 100%);
   border-bottom: 1px solid var(--border);
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 6px 18px rgba(0, 0, 0, 0.35);
   z-index: 10;
@@ -228,7 +246,7 @@ body {
 
 .trace-listbox-item:hover { background: var(--surface-hi); }
 .trace-listbox-item.active {
-  background: rgba(77, 163, 255, 0.14);
+  background: rgba(var(--accent-rgb), 0.14);
   border-left-color: var(--accent);
   color: var(--text);
   font-weight: 550;
@@ -414,7 +432,7 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.dir-browser-item:hover { background: #283040; }
+.dir-browser-item:hover { background: var(--surface-hover); }
 .dir-browser-item::before { content: "\1F4C1  "; }
 .dir-browser-empty {
   padding: 10px 8px;
@@ -433,7 +451,7 @@ body {
 .catalog-modal {
   position: fixed;
   inset: 0;
-  background: rgba(5, 7, 11, 0.72);
+  background: rgba(6, 9, 11, 0.74);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
   display: flex;
@@ -508,9 +526,9 @@ body {
   flex: none;
   transition: all 0.13s var(--ease);
 }
-.catalog-chip-toggle:hover { border-color: #3a4657; color: var(--text); transform: none; }
+.catalog-chip-toggle:hover { border-color: var(--border-hi); color: var(--text); transform: none; }
 .catalog-chip-toggle.active {
-  background: rgba(77, 163, 255, 0.16);
+  background: rgba(var(--accent-rgb), 0.16);
   border-color: var(--accent);
   color: var(--accent);
   box-shadow: 0 0 12px var(--accent-glow);
@@ -580,8 +598,8 @@ body {
   /* A faint radial wash keeps the canvas from reading as a flat void when
      a trace is short and most of the frame is empty road. */
   background:
-    radial-gradient(ellipse 80% 60% at 50% 40%, rgba(77, 163, 255, 0.05), transparent 70%),
-    #070a0f;
+    radial-gradient(ellipse 80% 60% at 50% 40%, rgba(var(--accent-rgb), 0.05), transparent 70%),
+    #080b0d;
   display: flex;
   flex-direction: column;
 }
@@ -628,7 +646,7 @@ body {
 /* The overlays float over live canvas, so they're frosted rather than
    opaque -- the scene stays readable underneath them. */
 .viewport-controls, .legend, .gps-readout {
-  background: rgba(18, 22, 31, 0.72);
+  background: rgba(19, 26, 30, 0.74);
   backdrop-filter: blur(14px) saturate(150%);
   -webkit-backdrop-filter: blur(14px) saturate(150%);
   border: 1px solid rgba(255, 255, 255, 0.07);
@@ -789,8 +807,8 @@ body {
 }
 
 .badge {
-  background: rgba(77, 163, 255, 0.16);
-  border: 1px solid rgba(77, 163, 255, 0.32);
+  background: rgba(var(--accent-rgb), 0.16);
+  border: 1px solid rgba(var(--accent-rgb), 0.32);
   color: var(--accent);
   border-radius: 999px;
   padding: 1px 8px;
@@ -829,8 +847,8 @@ button {
 }
 
 button:hover {
-  background: linear-gradient(180deg, #2b3543 0%, #212936 100%);
-  border-color: #3a4657;
+  background: linear-gradient(180deg, var(--surface-hover) 0%, var(--surface-hi) 100%);
+  border-color: var(--border-hi);
   transform: translateY(-1px);
   box-shadow: 0 3px 10px rgba(0, 0, 0, 0.35);
 }
@@ -973,8 +991,8 @@ input[type="checkbox"] { accent-color: var(--accent); cursor: pointer; }
 .vehicle-item.selected, .static-object-item.selected, .variant-item.selected {
   border-color: var(--accent);
   border-left-color: var(--accent);
-  background: rgba(77, 163, 255, 0.1);
-  box-shadow: 0 0 0 1px var(--accent-glow), 0 0 16px rgba(77, 163, 255, 0.12);
+  background: rgba(var(--accent-rgb), 0.1);
+  box-shadow: 0 0 0 1px var(--accent-glow), 0 0 16px rgba(var(--accent-rgb), 0.12);
 }
 
 /* ---------- Export provenance ---------- */
@@ -1069,7 +1087,7 @@ input[type="checkbox"] { accent-color: var(--accent); cursor: pointer; }
   align-items: center;
   gap: 13px;
   padding: 11px 18px;
-  background: linear-gradient(180deg, #11151d 0%, #151b25 100%);
+  background: linear-gradient(180deg, var(--panel-bg) 0%, var(--panel-bg-alt) 100%);
   border-top: 1px solid var(--border);
   box-shadow: 0 -6px 18px rgba(0, 0, 0, 0.35);
 }
@@ -1109,13 +1127,13 @@ input[type="range"]::-webkit-slider-runnable-track {
   /* --fill is set per-frame from updateTimeLabel(); the sync-offset slider
      never sets it, so it falls back to an unfilled track. */
   background:
-    linear-gradient(90deg, #4da3ff 0%, #7b6cff var(--fill, 0%), rgba(255,255,255,0.09) var(--fill, 0%));
+    linear-gradient(90deg, var(--accent-2) 0%, var(--accent) var(--fill, 0%), rgba(255,255,255,0.09) var(--fill, 0%));
 }
 input[type="range"]::-moz-range-track {
   height: 5px;
   border-radius: 3px;
   background:
-    linear-gradient(90deg, #4da3ff 0%, #7b6cff var(--fill, 0%), rgba(255,255,255,0.09) var(--fill, 0%));
+    linear-gradient(90deg, var(--accent-2) 0%, var(--accent) var(--fill, 0%), rgba(255,255,255,0.09) var(--fill, 0%));
 }
 input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
@@ -1126,7 +1144,7 @@ input[type="range"]::-webkit-slider-thumb {
   border-radius: 50%;
   background: #fff;
   border: none;
-  box-shadow: 0 0 0 3px rgba(77, 163, 255, 0.35), 0 1px 4px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.35), 0 1px 4px rgba(0, 0, 0, 0.5);
   transition: box-shadow 0.14s var(--ease), transform 0.1s var(--ease);
 }
 input[type="range"]::-moz-range-thumb {
@@ -1135,7 +1153,7 @@ input[type="range"]::-moz-range-thumb {
   border-radius: 50%;
   background: #fff;
   border: none;
-  box-shadow: 0 0 0 3px rgba(77, 163, 255, 0.35), 0 1px 4px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.35), 0 1px 4px rgba(0, 0, 0, 0.5);
 }
 input[type="range"]:hover::-webkit-slider-thumb {
   transform: scale(1.15);
@@ -1161,3 +1179,131 @@ input[type="range"]:hover::-webkit-slider-thumb {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ---------- OSM map panel ---------- */
+
+.map-panel {
+  position: fixed;
+  right: 20px;
+  bottom: 86px;  /* clear of the timeline bar */
+  width: 420px;
+  height: 340px;
+  min-width: 260px;
+  min-height: 200px;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-pop);
+  z-index: 40;
+  overflow: hidden;
+  animation: pop-in 0.14s var(--ease);
+}
+
+.map-panel.hidden { display: none; }
+
+.map-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px 7px 11px;
+  background: linear-gradient(180deg, var(--panel-bg-alt) 0%, var(--panel-bg) 100%);
+  border-bottom: 1px solid var(--border);
+  cursor: move;
+  user-select: none;
+}
+
+.map-panel-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.map-panel-status {
+  flex: 1;
+  min-width: 0;
+  font-size: 11px;
+  color: var(--medium);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.map-panel-canvas {
+  flex: 1;
+  min-height: 0;
+  background: var(--panel-bg-alt);
+}
+
+/* Bottom-right grip, drawn as two diagonal rules. */
+.map-panel-resize {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+  background:
+    linear-gradient(135deg, transparent 0 46%, var(--text-faint) 46% 54%, transparent 54%),
+    linear-gradient(135deg, transparent 0 70%, var(--text-faint) 70% 78%, transparent 78%);
+  z-index: 1000;  /* above Leaflet's own panes */
+}
+
+/* Leaflet's defaults are built for a light page; these pull its chrome onto
+   the app's own ramp so the panel doesn't look bolted on. */
+.map-panel .leaflet-container {
+  background: var(--panel-bg-alt);
+  font-family: inherit;
+  font-size: 11px;
+}
+.map-panel .leaflet-control-attribution {
+  background: rgba(19, 26, 30, 0.8);
+  color: var(--text-faint);
+}
+.map-panel .leaflet-control-attribution a { color: var(--text-dim); }
+.map-panel .leaflet-bar a {
+  background: var(--panel-bg-alt);
+  color: var(--text);
+  border-bottom-color: var(--border);
+}
+.map-panel .leaflet-bar a:hover { background: var(--surface-hover); color: var(--text); }
+.map-panel .leaflet-tooltip {
+  background: var(--panel-bg-alt);
+  border: 1px solid var(--border);
+  color: var(--text);
+  box-shadow: var(--shadow-lift);
+}
+.map-panel .leaflet-tooltip::before { border-top-color: var(--border); }
+
+/* The route, matching the viewport's own "whole route faint, driven part
+   solid" reading. stroke-* rather than Leaflet's `color` option so the
+   theme owns it. */
+.map-route {
+  stroke: var(--accent);
+  stroke-opacity: 0.32;
+  stroke-linecap: round;
+  fill: none;
+}
+.map-route-driven {
+  stroke: var(--brand-pale);
+  stroke-opacity: 0.95;
+  stroke-linecap: round;
+  fill: none;
+}
+.map-endpoint { stroke: var(--brand-pale); stroke-width: 2; fill-opacity: 0.9; }
+.map-endpoint.start { fill: var(--good); }
+.map-endpoint.end { fill: var(--high); }
+
+.map-ego-marker .map-ego-halo {
+  fill: rgba(var(--accent-rgb), 0.22);
+  stroke: var(--accent);
+  stroke-width: 1.5;
+}
+.map-ego-marker .map-ego-arrow {
+  fill: var(--brand-pale);
+  stroke: var(--brand-deep);
+  stroke-width: 1;
+}
+.map-ego-marker svg { transform-origin: 50% 50%; display: block; }

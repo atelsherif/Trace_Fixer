@@ -139,6 +139,14 @@ def build_scene_json(trace: Trace, max_ego_points: int = 1500) -> dict:
                 "x": pose.x_m,
                 "y": pose.y_m,
                 "heading_deg": (90 + pose.heading_deg) % 360,
+                # The same heading in compass terms (clockwise from north),
+                # i.e. exactly as the ADMA logged it. heading_deg above has
+                # been rotated into the viewport's math convention
+                # (counter-clockwise from +x); anything drawing on a real
+                # map -- the OSM panel's vehicle marker -- needs the compass
+                # bearing, and should not have to invert that rotation and
+                # silently break if the convention ever moves.
+                "bearing_deg": pose.heading_deg % 360,
                 "speed_mps": math.hypot(pose.vx_mps, pose.vy_mps),
                 "v_fwd_mps": v_fwd,
                 "v_lat_mps": v_lat,

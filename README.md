@@ -267,9 +267,11 @@ from a single frame without scrubbing.
     `.xml` — see *Trace summary report* below. Every export writes into
     `output/` and never triggers a browser download — see *Output
     directory* below.
-11. **Map (OSM)** (viewport controls, top-left of the canvas) overlays
-    nearby OpenStreetMap roads on the visualizer for the currently loaded
-    trace, once you check it — see *Map overlay in the visualizer* below.
+11. **Map (OSM)** (viewport controls, top-left of the canvas) opens a real
+    OpenStreetMap view of *where this trace was driven*, in a floating
+    panel. **OSM roads**, next to it, is the other thing — it pulls road
+    centerlines into the viewport's own coordinate frame for geometry
+    comparison. See *Seeing where a trace was driven* below.
 12. **Alternative Scenarios** (below Export) generates a menu of harder/
     different scenarios from the current trace by perturbing one
     surrounding vehicle's trajectory at a time, previewable and separately
@@ -630,7 +632,35 @@ backend/trace_fixer/
   api.py                      FastAPI app + REST endpoints
 frontend/                     vanilla JS + canvas 2D top-down viewer
                                (no build step)
+  vendor/leaflet/             Leaflet 1.9.4, vendored so the app starts
+                               with no internet (see the OSM map panel)
 ```
+
+## Theme
+
+The whole interface is one hue ramp, extended from three brand tones —
+`#4e6b7c`, `#93adbc`, `#e4eaee` — which are the same colour (h≈203, s≈23%)
+at lightness 40 / 66 / 91. `:root` in `frontend/style.css` continues that
+ramp downward for surfaces, so the chrome reads as one material rather than
+a set of unrelated greys. Translucent accent washes are written as
+`rgba(var(--accent-rgb), a)` so the accent lives in exactly one place.
+
+Two sets of colours deliberately sit **outside** the brand ramp, because
+they carry meaning rather than identity:
+
+- **Issue severity** (`--high` / `--medium` / `--low` / `--good`). A
+  reviewer has to tell "high" from "low" at a glance, which three tints of
+  one hue cannot do.
+- **Vehicle categories on the canvas** — vehicle / predicted / flagged stay
+  maximally distinguishable from each other. The ego, the ground grid and
+  selection rings do follow the ramp, since those are chrome.
+
+A 2D canvas context can't read a CSS custom property, so the canvas colours
+live in a `COLORS` object at the top of `frontend/app.js`, named to match
+the custom properties in `style.css`. The two have to be changed together —
+that's the price of having no build step, and keeping them in one block
+each is what keeps it to one edit rather than a hunt through the draw
+functions.
 
 ## Coordinate & unit conventions
 
@@ -957,13 +987,38 @@ richer HD Live Map product turns out to be available) can be added later
 as a second implementation of that same interface, without changing
 `road_geometry.py`, `opendrive.py`, or the API/GUI wiring at all.
 
-#### Map overlay in the visualizer (also opt-in, also online)
+### Seeing where a trace was driven
 
-Separately, once a trace is loaded, the **Map (OSM)** checkbox above the
-canvas fetches the same kind of OpenStreetMap road data for that one trace
-and draws it as blue background lines underneath the annotation-derived
-lane markings and vehicles — a quick sanity check of how the recorded
-lanes line up against the real road, not a replacement for either.
+Two different questions, two different controls, both above the canvas:
+
+**Map (OSM)** opens a floating, draggable, resizable panel with an actual
+slippy map — real OSM tiles, the trace's whole route drawn on it, a heading
+arrow that follows playback, and start/end markers. It answers *where in
+the world is this?*, which no amount of local (x, y) ever will. It floats
+rather than being a modal precisely so the replay keeps running beside it;
+**Follow** keeps it centred on the ego (panning by hand switches that off),
+the ▣ button zooms to the whole route, and where you leave the panel is
+remembered for next time.
+
+Leaflet is **vendored** into `frontend/vendor/leaflet/`, not loaded from a
+CDN: this is a local tool that has to start with no internet at all. Tiles
+obviously still need a network, and when they can't be reached the panel
+says so in its header rather than showing a blank grey square and leaving
+you to guess.
+
+The vehicle marker reads `bearing_deg` from the scene payload — the compass
+heading exactly as the ADMA logged it. The viewport's own `heading_deg` has
+been rotated into a math convention (counter-clockwise from +x), and having
+the map invert that rotation would break silently the day that convention
+moved, so the scene just carries both.
+
+#### OSM road overlay in the visualizer (opt-in, online)
+
+**OSM roads** is the other one: it fetches OpenStreetMap road centerlines
+for the loaded trace and draws them *into the viewport itself*, in the same
+coordinate frame as the annotation, underneath the annotation-derived lane
+markings and vehicles — a quick sanity check of how the recorded lanes line
+up against the real road, not a replacement for either.
 
 - It's per-trace and on demand only: nothing is fetched until you check
   the box, there's no batch/background version, and unchecking or

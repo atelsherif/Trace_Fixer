@@ -8,7 +8,13 @@
        broken against a cached copy -- a browser holding the previous
        style.css rendered the topbar logo below at its natural size
        (a full-page-wide image) because the rule sizing it was missing. -->
-  <link rel="stylesheet" href="style.css?v=3" />
+  <!-- Vendored, not from a CDN: this is a local tool that has to start and
+       render with no internet at all. Tiles obviously still need a network,
+       but the panel itself comes up and says so rather than the whole page
+       failing on a blocked script. -->
+  <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
+  <script src="vendor/leaflet/leaflet.js"></script>
+  <link rel="stylesheet" href="style.css?v=4" />
 </head>
 <body>
   <header class="topbar">
@@ -154,8 +160,11 @@
             <label class="checkbox-field" title="Overlay each vehicle where the annotation originally recorded it, before Apply fixes moved it or an alternative scenario perturbed it. Drawn as a dashed grey outline with a dashed trail. Nothing to show on an untouched trace.">
               <input id="show-original" type="checkbox" /> Original (pre-fix)
             </label>
-            <label class="checkbox-field" title="Fetch nearby roads from OpenStreetMap and draw them as background context. Requires internet; fetched once per trace, then cached.">
-              <input id="show-map-overlay" type="checkbox" /> Map (OSM)
+            <label class="checkbox-field" title="Open a real OpenStreetMap view of where this trace was driven, in a movable panel. The full route is drawn on it and a marker follows playback. Requires internet for the map tiles.">
+              <input id="show-map-panel" type="checkbox" /> Map (OSM)
+            </label>
+            <label class="checkbox-field" title="Fetch nearby road centerlines from OpenStreetMap and draw them into the viewport itself, in the same coordinate frame as the annotation — for checking annotated geometry against the real road. Requires internet; fetched once per trace, then cached.">
+              <input id="show-map-overlay" type="checkbox" /> OSM roads
             </label>
             <span id="map-overlay-status" class="map-overlay-status"></span>
           </div>
@@ -283,6 +292,23 @@
       </div>
     </aside>
   </main>
+
+  <!-- Floating, draggable, resizable rather than a modal: the whole point is
+       to see where you are on a real map *while* the replay runs, so it must
+       not take the viewport away. -->
+  <div id="map-panel" class="map-panel hidden">
+    <div id="map-panel-header" class="map-panel-header">
+      <span class="map-panel-title">Where we're driving</span>
+      <span id="map-panel-status" class="map-panel-status"></span>
+      <label class="checkbox-field" title="Keep the map centered on the ego vehicle as the replay runs. Uncheck to pan/zoom freely — panning the map by hand also unchecks it.">
+        <input id="map-panel-follow" type="checkbox" checked /> Follow
+      </label>
+      <button id="map-panel-fit" class="trace-nav-btn" title="Zoom to the whole route">&#9635;</button>
+      <button id="map-panel-close" class="trace-nav-btn" title="Close">&#10005;</button>
+    </div>
+    <div id="map-panel-canvas" class="map-panel-canvas"></div>
+    <div id="map-panel-resize" class="map-panel-resize" title="Drag to resize"></div>
+  </div>
 
   <div id="catalog-modal" class="catalog-modal hidden">
     <div class="catalog-dialog">

@@ -29,6 +29,34 @@ const state = {
 const el = (id) => document.getElementById(id);
 const canvas = () => el("viewport");
 
+/** Canvas colours, kept beside the CSS custom properties of the same names
+ * in style.css -- a 2D context can't read a CSS variable, so the two have to
+ * be changed together. Anything the theme owns lives here rather than inline,
+ * so re-theming is one edit instead of a hunt through the draw functions.
+ *
+ * Note which of these are *brand* and which are *data*: the chrome (ego,
+ * ground grid, selection) follows the brand ramp, while vehicle / predicted /
+ * flagged are categorical encodings and stay maximally distinguishable
+ * instead. */
+const COLORS = {
+  ego: "#93adbc",
+  egoFill: "#93adbc88",
+  egoRoute: "147, 173, 188",   // rgb triple, alpha varies by layer
+  selection: "#c0cfd8",
+  grid: "rgba(147, 173, 188, 0.07)",
+  vehicle: "#6ee7a8",
+  vehicleFill: "#6ee7a855",
+  predicted: "#b98cf2",
+  predictedFill: "#b98cf233",
+  flagged: "#ff6b73",
+  flaggedFill: "#ff6b7355",
+  lane: "#4a5568",
+  roadEdge: "#c98a3c",
+  original: "#6f7a84",
+  mapRoads: "#4e6b7c",
+  staticObject: "#58798d",
+};
+
 // ---------- API helpers ----------
 
 async function apiGet(path) {
@@ -254,6 +282,9 @@ async function loadTrace(traceId) {
   state.showMapOverlay = false;
   el("show-map-overlay").checked = false;
   el("map-overlay-status").textContent = "";
+  // A panel left open follows you to the new trace rather than showing the
+  // previous one's route.
+  if (mapPanelIsOpen()) syncMapPanelToScene({ recenter: true });
   await loadVariantsList();
   await refreshExportLog();
   setStatus(`Loaded ${traceId}: ${scene.vehicles.length} vehicles, ${scene.duration_s.toFixed(1)}s.`);
@@ -394,6 +425,7 @@ function egoAt(t) {
     v_vert_mps: a.v_vert_mps + (b.v_vert_mps - a.v_vert_mps) * f,
     lat: a.lat + (b.lat - a.lat) * f,
     lon: a.lon + (b.lon - a.lon) * f,
+    bearing_deg: lerpHeadingDeg(a.bearing_deg, b.bearing_deg, f),
     dist_m: a.dist_m + (b.dist_m - a.dist_m) * f,
   }));
 }
@@ -511,10 +543,10 @@ function draw() {
     if (!v) continue;
     const isFlagged = flagged.has(vehicle.id);
     const isSelected = state.selectedVehicleId === vehicle.id;
-    const color = v.synthetic ? "#b98cf2" : isFlagged ? "#ff5f6d" : "#6ee7a8";
+    const color = v.synthetic ? COLORS.predicted : isFlagged ? COLORS.flagged : COLORS.vehicle;
     drawTrail(ctx, vehicle.observations, state.timeS, color, lineWidthWorld);
     drawBox(ctx, v.x, v.y, v.heading_deg, v.length, v.width, {
-      fill: v.synthetic ? "#b98cf233" : isFlagged ? "#ff5f6d55" : "#6ee7a855",
+      fill: v.synthetic ? COLORS.predictedFill : isFlagged ? COLORS.flaggedFill : COLORS.vehicleFill,
       stroke: color,
       dashed: v.synthetic,
       lineWidth: (isSelected ? 3 : 1.5) * lineWidthWorld,
@@ -522,7 +554,7 @@ function draw() {
     });
     if (isSelected) {
       ctx.save();
-      ctx.strokeStyle = "#4da3ff";
+      ctx.strokeStyle = COLORS.selection;
       ctx.lineWidth = 2.5 * lineWidthWorld;
       ctx.beginPath();
       ctx.arc(v.x, v.y, Math.max(v.length, v.width) * 0.75, 0, Math.PI * 2);
@@ -533,8 +565,8 @@ function draw() {
 
   if (ego) {
     drawBox(ctx, ego.x, ego.y, ego.heading_deg, state.scene.ego.length, state.scene.ego.width, {
-      fill: "#4da3ff88",
-      stroke: "#4da3ff",
+      fill: COLORS.egoFill,
+      stroke: COLORS.ego,
       lineWidth: 2 * lineWidthWorld,
       glow: 16,
     });
@@ -555,7 +587,7 @@ function drawGroundGrid(ctx, cx, cy, radiusM, lineWidthWorld) {
   const x0 = Math.floor((cx - radiusM) / GRID_SPACING_M) * GRID_SPACING_M;
   const y0 = Math.floor((cy - radiusM) / GRID_SPACING_M) * GRID_SPACING_M;
   ctx.save();
-  ctx.strokeStyle = "rgba(120, 160, 220, 0.07)";
+  ctx.strokeStyle = COLORS.grid;
   ctx.lineWidth = lineWidthWorld;
   ctx.beginPath();
   for (let x = x0; x <= cx + radiusM; x += GRID_SPACING_M) {
@@ -579,14 +611,14 @@ function drawEgoRoute(ctx, path, tNow, lineWidthWorld) {
   ctx.lineJoin = "round";
   ctx.lineCap = "round";
 
-  ctx.strokeStyle = "rgba(77, 163, 255, 0.16)";
+  ctx.strokeStyle = `rgba(${COLORS.egoRoute}, 0.16)`;
   ctx.lineWidth = lineWidthWorld * 1.5;
   ctx.beginPath();
   ctx.moveTo(path[0].x, path[0].y);
   for (let i = 1; i < path.length; i++) ctx.lineTo(path[i].x, path[i].y);
   ctx.stroke();
 
-  ctx.strokeStyle = "rgba(77, 163, 255, 0.55)";
+  ctx.strokeStyle = `rgba(${COLORS.egoRoute}, 0.6)`;
   ctx.lineWidth = lineWidthWorld * 2;
   ctx.beginPath();
   ctx.moveTo(path[0].x, path[0].y);
@@ -595,7 +627,7 @@ function drawEgoRoute(ctx, path, tNow, lineWidthWorld) {
   ctx.restore();
 }
 
-const ORIGINAL_COLOR = "#9aa5b8";  // keep in sync with --original-color
+const ORIGINAL_COLOR = COLORS.original;
 const MIN_ORIGINAL_DELTA_M = 0.05;  // below this the fix moved nothing worth drawing
 
 /** Each vehicle where the annotation originally recorded it, as a dashed
@@ -675,8 +707,8 @@ function drawTrail(ctx, observations, tNow, color, lineWidthWorld) {
   ctx.restore();
 }
 
-const LANE_COLOR = "#4a5568";  // keep in sync with --lane-color
-const ROAD_EDGE_COLOR = "#c98a3c";  // keep in sync with --road-edge-color
+const LANE_COLOR = COLORS.lane;
+const ROAD_EDGE_COLOR = COLORS.roadEdge;
 const HATCH_SPACING_M = 4.0;
 const HATCH_LENGTH_M = 1.1;
 
@@ -761,7 +793,7 @@ function drawMapOverlay(ctx, ways, lineWidthWorld) {
   // drawn under the annotation-derived lane markings/border lines so the
   // ground truth this tool is actually validating always stays on top.
   ctx.save();
-  ctx.strokeStyle = "#3d6fa8";
+  ctx.strokeStyle = COLORS.mapRoads;
   ctx.lineWidth = lineWidthWorld * 2;
   ctx.setLineDash([]);
   for (const way of ways) {
@@ -776,7 +808,7 @@ function drawMapOverlay(ctx, ways, lineWidthWorld) {
 
 function drawStatic(ctx, objects, lineWidthWorld, selectedId) {
   ctx.save();
-  ctx.fillStyle = "#5a6478";
+  ctx.fillStyle = COLORS.staticObject;
   for (const obj of objects) {
     for (const o of obj.observations) {
       ctx.beginPath();
@@ -788,7 +820,7 @@ function drawStatic(ctx, objects, lineWidthWorld, selectedId) {
     const selected = objects.find((obj) => obj.id === selectedId);
     if (selected && selected.observations.length) {
       const o = selected.observations[0];
-      ctx.strokeStyle = "#4da3ff";
+      ctx.strokeStyle = COLORS.selection;
       ctx.lineWidth = 2.5 * lineWidthWorld;
       ctx.beginPath();
       ctx.arc(o.x, o.y, Math.max(1.5, o.width), 0, Math.PI * 2);
@@ -1176,6 +1208,262 @@ function renderEventList() {
   }
 }
 
+// ---------- OSM map panel ----------
+//
+// A real slippy map of where the trace was driven, in a floating panel
+// rather than a modal: the point is to see the actual road *while* the
+// replay runs, so it must not take the viewport away. Distinct from the
+// "OSM roads" viewport overlay, which pulls road centerlines into the
+// annotation's own coordinate frame for geometry comparison -- this one
+// answers "where in the world is this?", which no amount of local (x, y)
+// ever will.
+
+const MAP_TILE_URL = "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png";
+const MAP_ATTRIBUTION = '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors';
+// Leaflet redraw is far more expensive than a canvas frame and the marker
+// moves a few meters per frame at highway speed -- 10 Hz is indistinguishable
+// and leaves the animation loop alone.
+const MAP_UPDATE_INTERVAL_MS = 100;
+const MAP_LAYOUT_KEY = "pretwinner.mapPanel.layout";
+
+const mapPanel = {
+  map: null,
+  tiles: null,
+  routeLine: null,
+  drivenLine: null,
+  marker: null,
+  startDot: null,
+  endDot: null,
+  traceId: null,
+  follow: true,
+  lastUpdateMs: 0,
+  tileErrorSeen: false,
+};
+
+function mapStatus(text) {
+  el("map-panel-status").textContent = text;
+}
+
+/** A heading arrow rather than Leaflet's default pin: at these zoom levels
+ * "which way is it pointing" is most of what the marker is for. */
+function egoMarkerIcon(bearingDeg) {
+  return L.divIcon({
+    className: "map-ego-marker",
+    iconSize: [26, 26],
+    iconAnchor: [13, 13],
+    html:
+      `<svg viewBox="0 0 26 26" width="26" height="26" style="transform: rotate(${bearingDeg}deg)">` +
+      '<circle cx="13" cy="13" r="11" class="map-ego-halo" />' +
+      '<path d="M13 3 L19.5 21 L13 16.5 L6.5 21 Z" class="map-ego-arrow" />' +
+      "</svg>",
+  });
+}
+
+function openMapPanel() {
+  const panel = el("map-panel");
+  if (typeof L === "undefined") {
+    panel.classList.remove("hidden");
+    mapStatus("Leaflet failed to load — check frontend/vendor/leaflet/.");
+    return;
+  }
+  panel.classList.remove("hidden");
+  restoreMapPanelLayout();
+
+  if (!mapPanel.map) {
+    mapPanel.map = L.map("map-panel-canvas", {
+      zoomControl: true,
+      attributionControl: true,
+      // The panel floats over the app; letting a stray scroll zoom the map
+      // is more surprising than useful, so require a deliberate gesture.
+      scrollWheelZoom: true,
+    });
+    mapPanel.tiles = L.tileLayer(MAP_TILE_URL, { maxZoom: 19, attribution: MAP_ATTRIBUTION });
+    mapPanel.tiles.on("tileerror", () => {
+      if (mapPanel.tileErrorSeen) return;
+      mapPanel.tileErrorSeen = true;
+      mapStatus("Map tiles unavailable — no internet?");
+    });
+    mapPanel.tiles.on("load", () => {
+      if (!mapPanel.tileErrorSeen) mapStatus("");
+    });
+    mapPanel.tiles.addTo(mapPanel.map);
+    // Panning by hand is an explicit "stop following me".
+    mapPanel.map.on("dragstart", () => {
+      if (!mapPanel.follow) return;
+      mapPanel.follow = false;
+      el("map-panel-follow").checked = false;
+    });
+  }
+
+  // The container was display:none until a moment ago, so Leaflet measured
+  // it as 0x0 and would render a single grey tile without this.
+  mapPanel.map.invalidateSize();
+  syncMapPanelToScene({ recenter: true });
+}
+
+function closeMapPanel() {
+  el("map-panel").classList.add("hidden");
+  el("show-map-panel").checked = false;
+}
+
+function mapPanelIsOpen() {
+  return !el("map-panel").classList.contains("hidden") && !!mapPanel.map;
+}
+
+/** Draws (or redraws) the route for whatever scene is loaded now. Called on
+ * open, and again whenever the trace changes underneath an open panel. */
+function syncMapPanelToScene(opts = {}) {
+  if (!mapPanel.map || !state.scene) return;
+  const path = state.scene.ego.path.filter((p) => p.lat != null && p.lon != null);
+  if (path.length < 2) {
+    mapStatus("This trace has no GPS fix to place on a map.");
+    return;
+  }
+  const latlngs = path.map((p) => [p.lat, p.lon]);
+
+  for (const layer of [mapPanel.routeLine, mapPanel.drivenLine, mapPanel.marker, mapPanel.startDot, mapPanel.endDot]) {
+    if (layer) mapPanel.map.removeLayer(layer);
+  }
+  // Whole route faint, driven portion solid on top -- the same "where am I
+  // in this trace" reading the viewport's ego route gives.
+  mapPanel.routeLine = L.polyline(latlngs, { className: "map-route", weight: 5 }).addTo(mapPanel.map);
+  mapPanel.drivenLine = L.polyline([latlngs[0]], { className: "map-route-driven", weight: 5 }).addTo(mapPanel.map);
+  mapPanel.startDot = L.circleMarker(latlngs[0], { radius: 5, className: "map-endpoint start" })
+    .addTo(mapPanel.map)
+    .bindTooltip("Start");
+  mapPanel.endDot = L.circleMarker(latlngs[latlngs.length - 1], { radius: 5, className: "map-endpoint end" })
+    .addTo(mapPanel.map)
+    .bindTooltip("End");
+  mapPanel.marker = L.marker(latlngs[0], { icon: egoMarkerIcon(0), zIndexOffset: 1000 }).addTo(mapPanel.map);
+
+  mapPanel.traceId = state.traceId;
+  if (opts.recenter) fitMapPanelToRoute();
+  mapPanel.lastUpdateMs = 0;
+  updateMapPanelPosition(true);
+}
+
+function fitMapPanelToRoute() {
+  if (!mapPanel.map || !mapPanel.routeLine) return;
+  mapPanel.map.fitBounds(mapPanel.routeLine.getBounds(), { padding: [24, 24], maxZoom: 17 });
+}
+
+/** Moves the marker and extends the driven polyline to the current playback
+ * time. Called from the animation loop, so it throttles itself. */
+function updateMapPanelPosition(force = false) {
+  if (!mapPanelIsOpen() || !mapPanel.marker || !state.scene) return;
+  const now = performance.now();
+  if (!force && now - mapPanel.lastUpdateMs < MAP_UPDATE_INTERVAL_MS) return;
+  mapPanel.lastUpdateMs = now;
+
+  const ego = egoAt(state.timeS);
+  if (!ego || ego.lat == null || ego.lon == null) return;
+  const here = [ego.lat, ego.lon];
+  mapPanel.marker.setLatLng(here);
+  mapPanel.marker.setIcon(egoMarkerIcon(ego.bearing_deg || 0));
+
+  const driven = state.scene.ego.path.filter((p) => p.lat != null && p.t_s <= state.timeS).map((p) => [p.lat, p.lon]);
+  driven.push(here);
+  mapPanel.drivenLine.setLatLngs(driven);
+
+  if (mapPanel.follow) mapPanel.map.panTo(here, { animate: false });
+}
+
+// --- panel chrome: drag to move, corner to resize, remembered across runs ---
+
+function restoreMapPanelLayout() {
+  const panel = el("map-panel");
+  let layout = null;
+  try {
+    layout = JSON.parse(localStorage.getItem(MAP_LAYOUT_KEY) || "null");
+  } catch {
+    layout = null;  // corrupt/blocked storage is not a reason to fail to open
+  }
+  if (!layout) return;
+  // Clamp back on-screen: a panel remembered at the edge of a bigger monitor
+  // must not open off the side of a smaller one.
+  const width = Math.min(Math.max(layout.width || 380, 260), window.innerWidth - 20);
+  const height = Math.min(Math.max(layout.height || 320, 200), window.innerHeight - 20);
+  panel.style.width = `${width}px`;
+  panel.style.height = `${height}px`;
+  panel.style.left = `${Math.min(Math.max(layout.left ?? 0, 0), window.innerWidth - width)}px`;
+  panel.style.top = `${Math.min(Math.max(layout.top ?? 0, 0), window.innerHeight - height)}px`;
+  panel.style.right = "auto";
+  panel.style.bottom = "auto";
+}
+
+function saveMapPanelLayout() {
+  const r = el("map-panel").getBoundingClientRect();
+  try {
+    localStorage.setItem(
+      MAP_LAYOUT_KEY,
+      JSON.stringify({ left: r.left, top: r.top, width: r.width, height: r.height })
+    );
+  } catch {
+    // Private browsing / blocked storage: the panel still works, it just
+    // won't remember where it was.
+  }
+}
+
+function wireMapPanelChrome() {
+  const panel = el("map-panel");
+
+  const beginDrag = (startEvent, mode) => {
+    startEvent.preventDefault();
+    const r = panel.getBoundingClientRect();
+    const x0 = startEvent.clientX;
+    const y0 = startEvent.clientY;
+    // Switch from the CSS-anchored position to explicit left/top before
+    // moving, or the first drag jumps.
+    panel.style.left = `${r.left}px`;
+    panel.style.top = `${r.top}px`;
+    panel.style.right = "auto";
+    panel.style.bottom = "auto";
+
+    const onMove = (e) => {
+      const dx = e.clientX - x0;
+      const dy = e.clientY - y0;
+      if (mode === "move") {
+        panel.style.left = `${Math.min(Math.max(r.left + dx, 0), window.innerWidth - r.width)}px`;
+        panel.style.top = `${Math.min(Math.max(r.top + dy, 0), window.innerHeight - r.height)}px`;
+      } else {
+        panel.style.width = `${Math.max(260, r.width + dx)}px`;
+        panel.style.height = `${Math.max(200, r.height + dy)}px`;
+        if (mapPanel.map) mapPanel.map.invalidateSize();
+      }
+    };
+    const onUp = () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      if (mapPanel.map) mapPanel.map.invalidateSize();
+      saveMapPanelLayout();
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+  };
+
+  el("map-panel-header").addEventListener("pointerdown", (e) => {
+    // Let the header's own controls work normally.
+    if (e.target.closest("button, input, label")) return;
+    beginDrag(e, "move");
+  });
+  el("map-panel-resize").addEventListener("pointerdown", (e) => beginDrag(e, "resize"));
+
+  el("map-panel-close").addEventListener("click", closeMapPanel);
+  el("map-panel-fit").addEventListener("click", () => {
+    mapPanel.follow = false;
+    el("map-panel-follow").checked = false;
+    fitMapPanelToRoute();
+  });
+  el("map-panel-follow").addEventListener("change", (e) => {
+    mapPanel.follow = e.target.checked;
+    if (mapPanel.follow) updateMapPanelPosition(true);
+  });
+  el("show-map-panel").addEventListener("change", (e) => {
+    if (e.target.checked) openMapPanel();
+    else closeMapPanel();
+  });
+}
+
 // ---------- Timeline / playback ----------
 
 function updateTimeLabel() {
@@ -1247,6 +1535,7 @@ function tick(nowMs) {
     updateTimeLabel();
   }
   draw();
+  updateMapPanelPosition();  // self-throttling; a no-op while the panel is closed
   requestAnimationFrame(tick);
 }
 
@@ -1975,6 +2264,7 @@ let catalogSearchDebounce = null;
 async function init() {
   resizeCanvas();
   wireControls();
+  wireMapPanelChrome();
   await initTracePicker();
   try {
     const status = await apiGet("/api/batch/all/status");
