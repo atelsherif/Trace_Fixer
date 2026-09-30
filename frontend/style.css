@@ -1,44 +1,24 @@
 :root {
-  /* The whole interface is one hue ramp, extended from three given brand
-     tones -- #4e6b7c, #93adbc, #e4eaee -- which turn out to be the same
-     colour (h~203, s~23%) at lightness 40 / 66 / 91. Everything below is
-     that ramp continued downward for surfaces, so the chrome reads as one
-     material rather than a set of unrelated greys.
-
-     Surfaces are layered rather than flat: the app sits on the darkest
+  /* Surfaces are layered rather than flat: the app sits on the darkest
      ground, panels lift off it, and controls lift off panels again -- so
      depth reads from value alone, before any shadow is drawn. */
-  --brand-deep: #4e6b7c;   /* given */
-  --brand-mid: #93adbc;    /* given */
-  --brand-pale: #e4eaee;   /* given */
-  --bg: #0d1114;
-  --panel-bg: #131a1e;
-  --panel-bg-alt: #1a2329;
-  --surface-hi: #233038;
-  --surface-hover: #334652;
-  --border: #293842;
-  --border-soft: #1d282f;
-  --border-hi: #3b515e;
-  --text: #e4eaee;
-  --text-dim: #93adbc;
-  --text-faint: #58798d;
-  --accent: #93adbc;
-  --accent-2: #4e6b7c;
-  --accent-dim: #4e6b7c;
-  /* Componentwise, so translucent accent washes can be written as
-     rgba(var(--accent-rgb), a) instead of re-hardcoding the colour. */
-  --accent-rgb: 147, 173, 188;
-  --accent-glow: rgba(147, 173, 188, 0.28);
-  --accent-gradient: linear-gradient(135deg, #4e6b7c 0%, #93adbc 100%);
-  /* Everything from here down is OUTSIDE the brand ramp on purpose.
-
-     Severity encodes meaning: a reviewer has to tell "high" from "low" at
-     a glance, which three tints of one hue cannot do.
-
-     The rest mirror what the viewport canvas draws (see COLORS in app.js) --
-     they exist here only so the legend swatches match the scene. The brand
-     palette stops at the edge of the canvas: a data colour's job is to stay
-     apart from the other data colours, not to match the chrome. */
+  --bg: #0a0d13;
+  --panel-bg: #12161f;
+  --panel-bg-alt: #1a2029;
+  --surface-hi: #222a36;
+  --border: #262f3d;
+  --border-soft: #1c242f;
+  --text: #eef1f6;
+  --text-dim: #8b97ac;
+  --text-faint: #5c6779;
+  --accent: #4da3ff;
+  --accent-2: #7b6cff;
+  --accent-dim: #23539a;
+  /* Componentwise, so a translucent accent wash can be written as
+     rgba(var(--accent-rgb), a) rather than re-hardcoding the colour. */
+  --accent-rgb: 77, 163, 255;
+  --accent-glow: rgba(77, 163, 255, 0.28);
+  --accent-gradient: linear-gradient(135deg, #4da3ff 0%, #7b6cff 100%);
   --high: #ff5f6d;
   --medium: #ffb84d;
   --low: #7fd4ff;
@@ -92,7 +72,7 @@ body {
   border: 2px solid transparent;
   background-clip: content-box;
 }
-*::-webkit-scrollbar-thumb:hover { background: var(--surface-hover); background-clip: content-box; }
+*::-webkit-scrollbar-thumb:hover { background: #33404f; background-clip: content-box; }
 
 :focus-visible {
   outline: 2px solid var(--accent);
@@ -106,7 +86,7 @@ body {
   justify-content: space-between;
   gap: 16px;
   padding: 11px 18px;
-  background: linear-gradient(180deg, var(--panel-bg-alt) 0%, var(--panel-bg) 100%);
+  background: linear-gradient(180deg, #151b25 0%, #11151d 100%);
   border-bottom: 1px solid var(--border);
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03) inset, 0 6px 18px rgba(0, 0, 0, 0.35);
   z-index: 10;
@@ -251,7 +231,7 @@ body {
 
 .trace-listbox-item:hover { background: var(--surface-hi); }
 .trace-listbox-item.active {
-  background: rgba(var(--accent-rgb), 0.14);
+  background: rgba(77, 163, 255, 0.14);
   border-left-color: var(--accent);
   color: var(--text);
   font-weight: 550;
@@ -437,7 +417,7 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.dir-browser-item:hover { background: var(--surface-hover); }
+.dir-browser-item:hover { background: #283040; }
 .dir-browser-item::before { content: "\1F4C1  "; }
 .dir-browser-empty {
   padding: 10px 8px;
@@ -456,7 +436,7 @@ body {
 .catalog-modal {
   position: fixed;
   inset: 0;
-  background: rgba(6, 9, 11, 0.74);
+  background: rgba(5, 7, 11, 0.72);
   backdrop-filter: blur(6px);
   -webkit-backdrop-filter: blur(6px);
   display: flex;
@@ -531,9 +511,9 @@ body {
   flex: none;
   transition: all 0.13s var(--ease);
 }
-.catalog-chip-toggle:hover { border-color: var(--border-hi); color: var(--text); transform: none; }
+.catalog-chip-toggle:hover { border-color: #3a4657; color: var(--text); transform: none; }
 .catalog-chip-toggle.active {
-  background: rgba(var(--accent-rgb), 0.16);
+  background: rgba(77, 163, 255, 0.16);
   border-color: var(--accent);
   color: var(--accent);
   box-shadow: 0 0 12px var(--accent-glow);
@@ -651,7 +631,7 @@ body {
 /* The overlays float over live canvas, so they're frosted rather than
    opaque -- the scene stays readable underneath them. */
 .viewport-controls, .legend, .gps-readout {
-  background: rgba(19, 26, 30, 0.74);
+  background: rgba(18, 22, 31, 0.72);
   backdrop-filter: blur(14px) saturate(150%);
   -webkit-backdrop-filter: blur(14px) saturate(150%);
   border: 1px solid rgba(255, 255, 255, 0.07);
@@ -812,8 +792,8 @@ body {
 }
 
 .badge {
-  background: rgba(var(--accent-rgb), 0.16);
-  border: 1px solid rgba(var(--accent-rgb), 0.32);
+  background: rgba(77, 163, 255, 0.16);
+  border: 1px solid rgba(77, 163, 255, 0.32);
   color: var(--accent);
   border-radius: 999px;
   padding: 1px 8px;
@@ -852,8 +832,8 @@ button {
 }
 
 button:hover {
-  background: linear-gradient(180deg, var(--surface-hover) 0%, var(--surface-hi) 100%);
-  border-color: var(--border-hi);
+  background: linear-gradient(180deg, #2b3543 0%, #212936 100%);
+  border-color: #3a4657;
   transform: translateY(-1px);
   box-shadow: 0 3px 10px rgba(0, 0, 0, 0.35);
 }
@@ -996,8 +976,8 @@ input[type="checkbox"] { accent-color: var(--accent); cursor: pointer; }
 .vehicle-item.selected, .static-object-item.selected, .variant-item.selected {
   border-color: var(--accent);
   border-left-color: var(--accent);
-  background: rgba(var(--accent-rgb), 0.1);
-  box-shadow: 0 0 0 1px var(--accent-glow), 0 0 16px rgba(var(--accent-rgb), 0.12);
+  background: rgba(77, 163, 255, 0.1);
+  box-shadow: 0 0 0 1px var(--accent-glow), 0 0 16px rgba(77, 163, 255, 0.12);
 }
 
 /* ---------- Export provenance ---------- */
@@ -1092,7 +1072,7 @@ input[type="checkbox"] { accent-color: var(--accent); cursor: pointer; }
   align-items: center;
   gap: 13px;
   padding: 11px 18px;
-  background: linear-gradient(180deg, var(--panel-bg) 0%, var(--panel-bg-alt) 100%);
+  background: linear-gradient(180deg, #11151d 0%, #151b25 100%);
   border-top: 1px solid var(--border);
   box-shadow: 0 -6px 18px rgba(0, 0, 0, 0.35);
 }
@@ -1132,13 +1112,13 @@ input[type="range"]::-webkit-slider-runnable-track {
   /* --fill is set per-frame from updateTimeLabel(); the sync-offset slider
      never sets it, so it falls back to an unfilled track. */
   background:
-    linear-gradient(90deg, var(--accent-2) 0%, var(--accent) var(--fill, 0%), rgba(255,255,255,0.09) var(--fill, 0%));
+    linear-gradient(90deg, #4da3ff 0%, #7b6cff var(--fill, 0%), rgba(255,255,255,0.09) var(--fill, 0%));
 }
 input[type="range"]::-moz-range-track {
   height: 5px;
   border-radius: 3px;
   background:
-    linear-gradient(90deg, var(--accent-2) 0%, var(--accent) var(--fill, 0%), rgba(255,255,255,0.09) var(--fill, 0%));
+    linear-gradient(90deg, #4da3ff 0%, #7b6cff var(--fill, 0%), rgba(255,255,255,0.09) var(--fill, 0%));
 }
 input[type="range"]::-webkit-slider-thumb {
   -webkit-appearance: none;
@@ -1149,7 +1129,7 @@ input[type="range"]::-webkit-slider-thumb {
   border-radius: 50%;
   background: #fff;
   border: none;
-  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.35), 0 1px 4px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 0 0 3px rgba(77, 163, 255, 0.35), 0 1px 4px rgba(0, 0, 0, 0.5);
   transition: box-shadow 0.14s var(--ease), transform 0.1s var(--ease);
 }
 input[type="range"]::-moz-range-thumb {
@@ -1158,7 +1138,7 @@ input[type="range"]::-moz-range-thumb {
   border-radius: 50%;
   background: #fff;
   border: none;
-  box-shadow: 0 0 0 3px rgba(var(--accent-rgb), 0.35), 0 1px 4px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 0 0 3px rgba(77, 163, 255, 0.35), 0 1px 4px rgba(0, 0, 0, 0.5);
 }
 input[type="range"]:hover::-webkit-slider-thumb {
   transform: scale(1.15);
@@ -1213,7 +1193,7 @@ input[type="range"]:hover::-webkit-slider-thumb {
   align-items: center;
   gap: 8px;
   padding: 7px 8px 7px 11px;
-  background: linear-gradient(180deg, var(--panel-bg-alt) 0%, var(--panel-bg) 100%);
+  background: linear-gradient(180deg, #151b25 0%, #11151d 100%);
   border-bottom: 1px solid var(--border);
   cursor: move;
   user-select: none;
@@ -1257,14 +1237,14 @@ input[type="range"]:hover::-webkit-slider-thumb {
 }
 
 /* Leaflet's defaults are built for a light page; these pull its chrome onto
-   the app's own ramp so the panel doesn't look bolted on. */
+   the app's own palette so the panel doesn't look bolted on. */
 .map-panel .leaflet-container {
   background: var(--panel-bg-alt);
   font-family: inherit;
   font-size: 11px;
 }
 .map-panel .leaflet-control-attribution {
-  background: rgba(19, 26, 30, 0.8);
+  background: rgba(18, 22, 31, 0.8);
   color: var(--text-faint);
 }
 .map-panel .leaflet-control-attribution a { color: var(--text-dim); }
@@ -1273,7 +1253,7 @@ input[type="range"]:hover::-webkit-slider-thumb {
   color: var(--text);
   border-bottom-color: var(--border);
 }
-.map-panel .leaflet-bar a:hover { background: var(--surface-hover); color: var(--text); }
+.map-panel .leaflet-bar a:hover { background: var(--surface-hi); color: var(--text); }
 .map-panel .leaflet-tooltip {
   background: var(--panel-bg-alt);
   border: 1px solid var(--border);
@@ -1292,12 +1272,12 @@ input[type="range"]:hover::-webkit-slider-thumb {
   fill: none;
 }
 .map-route-driven {
-  stroke: var(--brand-pale);
+  stroke: var(--text);
   stroke-opacity: 0.95;
   stroke-linecap: round;
   fill: none;
 }
-.map-endpoint { stroke: var(--brand-pale); stroke-width: 2; fill-opacity: 0.9; }
+.map-endpoint { stroke: var(--text); stroke-width: 2; fill-opacity: 0.9; }
 .map-endpoint.start { fill: var(--good); }
 .map-endpoint.end { fill: var(--high); }
 
@@ -1307,8 +1287,8 @@ input[type="range"]:hover::-webkit-slider-thumb {
   stroke-width: 1.5;
 }
 .map-ego-marker .map-ego-arrow {
-  fill: var(--brand-pale);
-  stroke: var(--brand-deep);
+  fill: var(--text);
+  stroke: var(--bg);
   stroke-width: 1;
 }
 .map-ego-marker svg { transform-origin: 50% 50%; display: block; }

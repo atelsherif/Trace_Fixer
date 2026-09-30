@@ -638,22 +638,26 @@ frontend/                     vanilla JS + canvas 2D top-down viewer
 
 ## Theme
 
-The whole interface is one hue ramp, extended from three brand tones —
-`#4e6b7c`, `#93adbc`, `#e4eaee` — which are the same colour (h≈203, s≈23%)
-at lightness 40 / 66 / 91. `:root` in `frontend/style.css` continues that
-ramp downward for surfaces, so the chrome reads as one material rather than
-a set of unrelated greys. Translucent accent washes are written as
-`rgba(var(--accent-rgb), a)` so the accent lives in exactly one place.
+Dark, blue-accented chrome: surfaces are layered rather than flat, so the
+app sits on the darkest ground, panels lift off it, and controls lift off
+panels again — depth reads from value alone, before any shadow is drawn.
+All of it lives in `:root` in `frontend/style.css`. Translucent accent
+washes are written as `rgba(var(--accent-rgb), a)` so the accent colour
+lives in exactly one place.
 
-**The brand palette stops at the edge of the canvas.** Everything the
-viewport draws — ego, vehicles, predictions, flagged boxes, the pre-fix
-ghost, lane markings, road edges, the ground grid — encodes data, and a
-data colour's job is to stay apart from the *other* data colours, not to
-match the chrome. Re-theming those would make the scene harder to read to
-make it look tidier, which is the wrong trade. Issue severity (`--high` /
-`--medium` / `--low` / `--good`) sits outside the ramp for the same reason:
-a reviewer has to tell "high" from "low" at a glance, which three tints of
-one hue cannot do.
+A brand palette (`#4e6b7c` / `#93adbc` / `#e4eaee`) was applied over this
+and then reverted — it read as flatter and more washed-out than the blue it
+replaced. `--accent-rgb` is the one thing kept from that pass, because
+component-wise accents are useful regardless of which accent it holds.
+
+**Canvas colours are separate from chrome, whatever the chrome does.**
+Everything the viewport draws — ego, vehicles, predictions, flagged boxes,
+the pre-fix ghost, lane markings, road edges, the ground grid — encodes
+data, and a data colour's job is to stay apart from the *other* data
+colours, not to match the UI. Re-theming those makes the scene harder to
+read in exchange for looking tidier, which is the wrong trade. Issue
+severity (`--high` / `--medium` / `--low` / `--good`) sits apart for the
+same reason: a reviewer has to tell "high" from "low" at a glance.
 
 A 2D canvas context can't read a CSS custom property, so the canvas colours
 live in a `COLORS` object at the top of `frontend/app.js`. `style.css`
