@@ -1,6 +1,7 @@
 """Shared data model for a parsed trace pair (ADMA ego trace + annotation file)."""
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 
 
@@ -60,6 +61,31 @@ class VehicleObs:
     heading_deg: float = 0.0
     synthetic: bool = False  # True if produced by pre/post-FOV prediction, not original annotation
     fixed: bool = False  # True if position/heading were adjusted by the fix engine
+    # Where this observation sat when the annotation was first parsed, kept
+    # so the GUI can draw the before/after difference (and so "what did the
+    # fix actually change?" is answerable without re-reading the file).
+    # Captured once, immediately before the first pass that may move this
+    # observation, and never overwritten -- so after fixing *and then*
+    # perturbing into a variant, this is still the as-recorded position,
+    # not an intermediate one.
+    orig_x_m: float | None = None
+    orig_y_m: float | None = None
+    orig_heading_deg: float | None = None
+
+    def remember_original(self) -> None:
+        """Idempotent: only the first call records anything."""
+        if self.orig_x_m is None:
+            self.orig_x_m = self.x_m
+            self.orig_y_m = self.y_m
+            self.orig_heading_deg = self.heading_deg
+
+    @property
+    def moved_from_original_m(self) -> float:
+        """How far this observation has been moved from where it was
+        recorded. 0.0 for an untouched or synthetic observation."""
+        if self.orig_x_m is None or self.orig_y_m is None:
+            return 0.0
+        return math.hypot(self.x_m - self.orig_x_m, self.y_m - self.orig_y_m)
 
 
 @dataclass

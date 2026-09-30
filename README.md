@@ -58,7 +58,21 @@ exists, both spots quietly fall back to no icon / text-only (an
 `onerror` handler in `index.html`, not a missing-image icon), so its
 absence is never an error.
 
-Recommended: **square**, **PNG**, **at least 256×256px** (512×512 is
+The repository carries `frontend/Pre_twinner_logo.jpeg` (2048×2048,
+1.3 MB) as the source artwork, and `frontend/logo.png` — a 256×256, 52 KB
+downscale of it — as the file the app actually loads. Regenerate the
+latter after changing the former rather than pointing the app at the
+full-size jpeg: it is served on every page load for a 22px mark and a tab
+icon, so the 25x size difference is pure waste.
+
+```bash
+python3 -c "from PIL import Image; \
+  Image.open('frontend/Pre_twinner_logo.jpeg').convert('RGB') \
+       .resize((256, 256), Image.LANCZOS) \
+       .save('frontend/logo.png', 'PNG', optimize=True)"
+```
+
+Recommended for a replacement: **square**, **PNG**, **at least 256×256px** (512×512 is
 safer for a crisp favicon on high-DPI displays) — the topbar mark is
 rendered at 22×22px (`#app-logo` in `style.css`) and the browser picks
 whatever favicon size it wants from the same file, so one reasonably
@@ -199,6 +213,18 @@ from a single frame without scrubbing.
    conflict closing faster than realistic braking can resolve still shows
    up as a collision issue afterward — that's the honest outcome for a
    speed-only governor with no steering, not a bug.
+   **Original (pre-fix)** on the viewport overlays each vehicle where the
+   annotation originally recorded it — a dashed grey outline, its own
+   dashed trail over the same trailing window as the live one, and a thin
+   leader line to where the vehicle sits now. It is drawn *under* the live
+   vehicles, and only where a position actually changed, so it never
+   hides what it is being compared against and never draws an identical
+   box on top of an untouched one. The as-recorded pose is captured once,
+   immediately before the first pass that could move an observation, and
+   never overwritten — so after fixing *and then* perturbing into an
+   alternative scenario, the ghost still shows the original annotation
+   rather than an intermediate state. The checkbox stays disabled (with a
+   tooltip saying why) until there is something to compare against.
 8. **Apply fixes** smooths flagged vehicle tracks, clamps positions back
    inside the annotated road corridor, and drops trailing observations that
    still overlap the ego vehicle after smoothing (a common "lost the track

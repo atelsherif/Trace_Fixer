@@ -190,3 +190,100 @@ def test_export_opendrive_and_openscenario_are_well_formed(trace):
     ET.fromstring(xodr)
     xosc = generate_openscenario(trace, "sample1.xodr")
     ET.fromstring(xosc)
+
+
+def test_fixes_record_where_each_observation_started(trace2):
+    """The GUI's "Original (pre-fix)" overlay needs the as-recorded
+    position to draw against. Captured lazily, so an untouched trace
+    carries none and the overlay has nothing to render."""
+    from trace_fixer.validation.checks import run_validation
+    from trace_fixer.validation.fixes import apply_fixes
+
+    before = [o for t in trace2.annotation.vehicles.values() for o in t.observations]
+    assert all(o.orig_x_m is None for o in before), "nothing recorded until something moves"
+
+    run_validation(trace2)
+    apply_fixes(trace2)
+
+    observations = [o for t in trace2.annotation.vehicles.values() for o in t.observations]
+    assert any(o.orig_x_m is not None for o in observations)
+    moved = [o for o in observations if o.moved_from_original_m > 0.05]
+    assert moved, "this trace has known issues, so the fix engine must have moved something"
+    # every moved observation carries a full pose to draw, not a partial one
+    for o in moved:
+        assert o.orig_y_m is not None and o.orig_heading_deg is not None
+
+
+def test_the_recorded_original_survives_a_second_fix_pass(trace2):
+    """Fixing twice must still compare against the as-recorded position,
+    not against the first pass's output."""
+    from trace_fixer.validation.checks import run_validation
+    from trace_fixer.validation.fixes import apply_fixes
+
+    run_validation(trace2)
+    apply_fixes(trace2)
+    first = {
+        (t.obj_id, o.t_us): o.orig_x_m
+        for t in trace2.annotation.vehicles.values()
+        for o in t.observations
+    }
+    apply_fixes(trace2)
+    second = {
+        (t.obj_id, o.t_us): o.orig_x_m
+        for t in trace2.annotation.vehicles.values()
+        for o in t.observations
+    }
+    for key, value in first.items():
+        assert second.get(key) == value
+
+
+def test_scene_json_exposes_the_original_positions(trace2):
+    from trace_fixer.scene import build_scene_json
+    from trace_fixer.validation.checks import run_validation
+    from trace_fixer.validation.fixes import apply_fixes
+
+    assert build_scene_json(trace2)["has_original_positions"] is False
+
+    run_validation(trace2)
+    apply_fixes(trace2)
+    scene = build_scene_json(trace2)
+    assert scene["has_original_positions"] is True
+    with_original = [
+        o for v in scene["vehicles"] for o in v["observations"] if o["orig_x"] is not None
+    ]
+    assert with_original
+    assert all(o["orig_y"] is not None and o["orig_heading_deg"] is not None for o in with_original)
+
+
+def test_duplicate_timestamps_do_not_nan_out_a_track(trace2):
+    """Regression guard: scipy's UnivariateSpline needs strictly
+    increasing x and answers a non-monotonic fit with an all-NaN curve
+    *without raising*, so the try/except around it never fired. A real
+    annotation repeating a timestamp turned every position in that track
+    into NaN, which then failed to JSON-serialize -- Apply fixes returned
+    a 500. sample2's vehicle 5 has four repeated timestamps.
+    """
+    import json
+    import math
+
+    from trace_fixer.scene import build_scene_json
+    from trace_fixer.validation.checks import run_validation
+    from trace_fixer.validation.fixes import apply_fixes
+
+    repeated = [
+        track.obj_id
+        for track in trace2.annotation.vehicles.values()
+        if len({o.t_us for o in track.observations}) < len(track.observations)
+    ]
+    assert repeated, "fixture must still contain a track with duplicate timestamps"
+
+    run_validation(trace2)
+    apply_fixes(trace2)
+
+    for track in trace2.annotation.vehicles.values():
+        for o in track.observations:
+            assert math.isfinite(o.x_m) and math.isfinite(o.y_m)
+            assert math.isfinite(o.x_rel) and math.isfinite(o.y_rel)
+
+    # the scene must survive strict JSON encoding, which is what the API does
+    json.dumps(build_scene_json(trace2), allow_nan=False)

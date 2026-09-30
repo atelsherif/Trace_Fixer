@@ -40,14 +40,35 @@ def _smooth_positions(track: VehicleTrack) -> None:
     t = np.array([o.t_us for o in obs], dtype=float)
     x = np.array([o.x_m for o in obs], dtype=float)
     y = np.array([o.y_m for o in obs], dtype=float)
-    s = SMOOTH_FACTOR_PER_POINT * n
+
+    # UnivariateSpline requires strictly increasing x. Real annotations do
+    # repeat a timestamp (two observations of one vehicle in the same
+    # frame), and scipy answers a non-monotonic fit with an all-NaN curve
+    # *without raising* -- so the try/except below never saw it, every
+    # position in the track became NaN, and the scene failed to serialize
+    # (a 500 from Apply fixes). Collapse repeats to their mean, fit on
+    # that, then evaluate at every original timestamp so duplicates still
+    # each get a smoothed position.
+    t_unique, inverse = np.unique(t, return_inverse=True)
+    if len(t_unique) < MIN_POINTS_FOR_SMOOTHING:
+        return
+    counts = np.bincount(inverse)
+    x_unique = np.bincount(inverse, weights=x) / counts
+    y_unique = np.bincount(inverse, weights=y) / counts
+
+    k = min(3, len(t_unique) - 1)
+    s = SMOOTH_FACTOR_PER_POINT * len(t_unique)
     try:
-        spl_x = UnivariateSpline(t, x, k=min(3, n - 1), s=s)
-        spl_y = UnivariateSpline(t, y, k=min(3, n - 1), s=s)
+        spl_x = UnivariateSpline(t_unique, x_unique, k=k, s=s)
+        spl_y = UnivariateSpline(t_unique, y_unique, k=k, s=s)
+        x_smooth = spl_x(t)
+        y_smooth = spl_y(t)
     except Exception:
         return
-    x_smooth = spl_x(t)
-    y_smooth = spl_y(t)
+    # Belt and braces: a silently degenerate fit must leave the track
+    # exactly as it was rather than write NaN into it.
+    if not (np.all(np.isfinite(x_smooth)) and np.all(np.isfinite(y_smooth))):
+        return
 
     for i, o in enumerate(obs):
         moved = math.hypot(x_smooth[i] - o.x_m, y_smooth[i] - o.y_m)
@@ -118,6 +139,11 @@ def apply_fixes(trace: Trace) -> list[str]:
     interp = EgoInterpolator(trace.ego)
     summary: list[str] = []
     for track in trace.annotation.vehicles.values():
+        # Snapshot before anything moves, so the GUI can draw the
+        # before/after difference. Idempotent, so fixing twice still
+        # compares against the as-recorded positions, not the first pass's.
+        for o in track.observations:
+            o.remember_original()
         before_n = len(track.observations)
         _smooth_positions(track)
         _reproject_relative(track, interp, trace.sync_offset_us)

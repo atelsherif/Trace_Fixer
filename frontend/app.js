@@ -14,6 +14,7 @@ const state = {
   selectedStaticObjectId: null,
   showLanes: true,
   showStatic: false,
+  showOriginal: false,
   showMapOverlay: false,
   mapOverlay: null,
   searchQuery: "",
@@ -333,7 +334,25 @@ function applyScene(scene) {
   renderEventList();
   updateTimeLabel();
   updateExportTarget();
+  updateOriginalOverlayControl();
   if (!state.activeVariantId) populatePovVehicleSelect();
+}
+
+/** The overlay needs something to compare against: on an as-recorded
+ * trace nothing has moved, so offer the checkbox but say why it would
+ * draw nothing rather than letting it look broken. */
+function updateOriginalOverlayControl() {
+  const available = !!(state.scene && state.scene.has_original_positions);
+  const box = el("show-original");
+  box.disabled = !available;
+  box.parentElement.title = available
+    ? "Overlay each vehicle where the annotation originally recorded it, before Apply fixes moved it or an alternative scenario perturbed it."
+    : "Nothing to compare yet — this trace is as recorded. Apply fixes, or preview an alternative scenario, then switch this on.";
+  if (!available && box.checked) {
+    box.checked = false;
+    state.showOriginal = false;
+  }
+  el("legend-original").classList.toggle("hidden", !(available && state.showOriginal));
 }
 
 // ---------- Interpolation ----------
@@ -390,6 +409,23 @@ function vehicleAt(vehicle, t) {
     width: a.width + (b.width - a.width) * f,
     synthetic: a.synthetic || b.synthetic,
     obj_lane: a.obj_lane,
+  }));
+}
+
+/** Where the annotation originally recorded this vehicle at time t,
+ * before Apply fixes moved it or a variant perturbed it. Null when this
+ * stretch of the track was never modified (or is predicted, which has no
+ * "before"), so the overlay only ever draws a real difference. */
+function originalVehicleAt(vehicle, t) {
+  const obs = vehicle.observations.filter((o) => o.orig_x !== null && o.orig_x !== undefined);
+  if (obs.length < 1) return null;
+  if (t < obs[0].t_s - 0.5 || t > obs[obs.length - 1].t_s + 0.5) return null;
+  return interpAtTime(obs, t, "t_s", (a, b, f) => ({
+    x: a.orig_x + (b.orig_x - a.orig_x) * f,
+    y: a.orig_y + (b.orig_y - a.orig_y) * f,
+    heading_deg: lerpHeadingDeg(a.orig_heading_deg, b.orig_heading_deg, f),
+    length: a.length + (b.length - a.length) * f,
+    width: a.width + (b.width - a.width) * f,
   }));
 }
 
@@ -463,6 +499,10 @@ function draw() {
   if (state.showStatic) drawStatic(ctx, state.scene.static_objects, lineWidthWorld, state.selectedStaticObjectId);
 
   drawEgoRoute(ctx, state.scene.ego.path, state.timeS, lineWidthWorld);
+
+  // Under the live vehicles, so a "before" ghost never hides the current
+  // state it is being compared against.
+  if (state.showOriginal) drawOriginalOverlay(ctx, state.scene.vehicles, state.timeS, lineWidthWorld);
 
   const flagged = activeIssuesAt(state.timeS);
   for (const vehicle of state.scene.vehicles) {
@@ -551,6 +591,64 @@ function drawEgoRoute(ctx, path, tNow, lineWidthWorld) {
   ctx.moveTo(path[0].x, path[0].y);
   for (let i = 1; i < path.length && path[i].t_s <= tNow; i++) ctx.lineTo(path[i].x, path[i].y);
   ctx.stroke();
+  ctx.restore();
+}
+
+const ORIGINAL_COLOR = "#9aa5b8";  // keep in sync with --original-color
+const MIN_ORIGINAL_DELTA_M = 0.05;  // below this the fix moved nothing worth drawing
+
+/** Each vehicle where the annotation originally recorded it, as a dashed
+ * outline plus its dashed pre-fix trail, with a leader line to where it
+ * sits now. Only drawn where the position actually changed -- an overlay
+ * that renders an identical box on top of every vehicle would just look
+ * like a rendering bug. */
+function drawOriginalOverlay(ctx, vehicles, tNow, lineWidthWorld) {
+  ctx.save();
+  ctx.strokeStyle = ORIGINAL_COLOR;
+  for (const vehicle of vehicles) {
+    const original = originalVehicleAt(vehicle, tNow);
+    if (!original) continue;
+    const current = vehicleAt(vehicle, tNow);
+    if (current && Math.hypot(current.x - original.x, current.y - original.y) < MIN_ORIGINAL_DELTA_M) {
+      continue;
+    }
+
+    // The pre-fix path over the same trailing window as the live trail,
+    // so the two read as a matched pair.
+    const recent = vehicle.observations.filter(
+      (o) => o.orig_x !== null && o.orig_x !== undefined && o.t_s <= tNow && o.t_s >= tNow - TRAIL_SECONDS
+    );
+    if (recent.length >= 2) {
+      ctx.save();
+      ctx.setLineDash([lineWidthWorld * 6, lineWidthWorld * 5]);
+      ctx.lineWidth = lineWidthWorld * 1.5;
+      ctx.globalAlpha = 0.55;
+      ctx.beginPath();
+      ctx.moveTo(recent[0].orig_x, recent[0].orig_y);
+      for (let i = 1; i < recent.length; i++) ctx.lineTo(recent[i].orig_x, recent[i].orig_y);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    drawBox(ctx, original.x, original.y, original.heading_deg, original.length, original.width, {
+      fill: "transparent",
+      stroke: ORIGINAL_COLOR,
+      dashed: true,
+      lineWidth: 1.5 * lineWidthWorld,
+    });
+
+    if (current) {
+      ctx.save();
+      ctx.setLineDash([lineWidthWorld * 3, lineWidthWorld * 3]);
+      ctx.lineWidth = lineWidthWorld;
+      ctx.globalAlpha = 0.5;
+      ctx.beginPath();
+      ctx.moveTo(original.x, original.y);
+      ctx.lineTo(current.x, current.y);
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
   ctx.restore();
 }
 
@@ -1220,6 +1318,11 @@ function wireControls() {
   el("gps-readout").addEventListener("click", copyGpsReadout);
   el("show-lanes").addEventListener("change", (e) => { state.showLanes = e.target.checked; draw(); });
   el("show-static").addEventListener("change", (e) => { state.showStatic = e.target.checked; draw(); });
+  el("show-original").addEventListener("change", (e) => {
+    state.showOriginal = e.target.checked;
+    updateOriginalOverlayControl();
+    draw();
+  });
   el("show-map-overlay").addEventListener("change", async (e) => {
     const checked = e.target.checked;
     const statusEl = el("map-overlay-status");

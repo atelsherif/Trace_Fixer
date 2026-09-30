@@ -245,6 +245,12 @@ def _build_variant(
     new_trace = copy.deepcopy(trace)
     track = new_trace.annotation.vehicles[vehicle_id]
     obs_sorted = sorted(track.observations, key=lambda o: o.t_us)
+    # Snapshot before perturbing, so the GUI can show what this variant
+    # actually changed. Idempotent, so a variant built from an
+    # already-fixed trace still compares against the as-recorded
+    # positions rather than the fixed ones.
+    for o in obs_sorted:
+        o.remember_original()
     apply_fn(obs_sorted)
     # Marks the perturbed observations as "fixed" so export.annotation_writer's
     # surgical XML patching (gated on this flag) actually writes the new

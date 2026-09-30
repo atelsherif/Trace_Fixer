@@ -146,6 +146,9 @@
             <label class="checkbox-field"><input id="heading-up" type="checkbox" checked /> Lock heading up</label>
             <label class="checkbox-field"><input id="show-lanes" type="checkbox" checked /> Lanes</label>
             <label class="checkbox-field"><input id="show-static" type="checkbox" /> Static objects</label>
+            <label class="checkbox-field" title="Overlay each vehicle where the annotation originally recorded it, before Apply fixes moved it or an alternative scenario perturbed it. Drawn as a dashed grey outline with a dashed trail. Nothing to show on an untouched trace.">
+              <input id="show-original" type="checkbox" /> Original (pre-fix)
+            </label>
             <label class="checkbox-field" title="Fetch nearby roads from OpenStreetMap and draw them as background context. Requires internet; fetched once per trace, then cached.">
               <input id="show-map-overlay" type="checkbox" /> Map (OSM)
             </label>
@@ -156,6 +159,7 @@
             <span><i class="swatch vehicle"></i>Vehicle</span>
             <span><i class="swatch predicted"></i>Predicted</span>
             <span><i class="swatch flagged"></i>Flagged</span>
+            <span id="legend-original" class="hidden"><i class="swatch original"></i>Original</span>
           </div>
         </div>
         <button id="gps-readout" class="gps-readout" title="Click to copy ego GPS coordinates">

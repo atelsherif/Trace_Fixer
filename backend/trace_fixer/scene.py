@@ -163,6 +163,12 @@ def build_scene_json(trace: Trace, max_ego_points: int = 1500) -> dict:
                 "obj_movement": obs.obj_movement,
                 "obj_confidence": obs.obj_confidence,
                 "synthetic": obs.synthetic,
+                # Only present once something has actually moved this
+                # observation, so the GUI's "Original" overlay has nothing
+                # to draw on an untouched trace -- see VehicleObs.
+                "orig_x": obs.orig_x_m,
+                "orig_y": obs.orig_y_m,
+                "orig_heading_deg": obs.orig_heading_deg,
             }
             for obs in track.observations
         ]
@@ -215,6 +221,14 @@ def build_scene_json(trace: Trace, max_ego_points: int = 1500) -> dict:
         # the Export panel with, so it's never ambiguous whether a click
         # exports the recording or the repaired version of it.
         "provenance": trace.provenance(),
+        # Whether anything in this scene has an as-recorded position to
+        # compare against -- lets the GUI say "nothing to compare" instead
+        # of offering an overlay that would draw nothing.
+        "has_original_positions": any(
+            o.orig_x_m is not None
+            for track in trace.annotation.vehicles.values()
+            for o in track.observations
+        ),
         "duration_s": duration_s,
         "ego": {"length": EGO_LENGTH_M, "width": EGO_WIDTH_M, "path": ego_path},
         "vehicles": vehicles,
