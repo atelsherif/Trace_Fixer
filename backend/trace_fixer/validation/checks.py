@@ -101,7 +101,14 @@ def _kinematic_checks(track: VehicleTrack, counter: list[int]) -> list[Issue]:
         dt1 = (obs[i + 1].t_us - obs[i].t_us) / 1e6
         if dt0 <= 0 or dt1 <= 0:
             continue
-        accel = (speeds[i + 1] - speeds[i]) / dt1 if i + 1 < len(speeds) else 0.0
+        # speeds[i] is the mean speed over [i-1, i] and speeds[i+1] over
+        # [i, i+1], so they are centred half an interval either side of
+        # obs[i] -- the time between them is (dt0 + dt1) / 2, not dt1.
+        # Dividing by dt1 alone is only right when the keyframes are evenly
+        # spaced, and overstates the acceleration by dt0/dt1 when they
+        # aren't: a real 0.4s/0.2s pairing reported twice the true value.
+        centred_dt = (dt0 + dt1) / 2.0
+        accel = (speeds[i + 1] - speeds[i]) / centred_dt if i + 1 < len(speeds) else 0.0
         severity = None
         if abs(accel) > ACCEL_HIGH_MPS2:
             severity = "high"

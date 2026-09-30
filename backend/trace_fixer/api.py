@@ -33,7 +33,7 @@ from trace_fixer.export.report import generate_txt_report, generate_xml_report
 from trace_fixer.geo.populate import populate_global_coords
 from trace_fixer.geo.transform import latlon_to_local
 from trace_fixer.prediction.extrapolate import clear_predictions, find_track_continuations, predict_all
-from trace_fixer.scene import build_scene_json
+from trace_fixer.scene import build_scene_json, load_trace
 from trace_fixer.store import TraceStore
 from trace_fixer.validation.checks import run_validation
 from trace_fixer.validation.fixes import DEFAULT_SMOOTHING, apply_fixes
@@ -345,14 +345,41 @@ def predict_clear(trace_id: str):
     return {"scene": build_scene_json(trace)}
 
 
-def _fix_predict_and_write_output(trace_id: str, opts: FixExportOptions) -> dict:
+def _load_pristine(trace_id: str):
+    """Parses a trace straight from its files, bypassing the store's cache.
+
+    Batch runs must not touch the interactive session's copy. The store
+    caches one mutable Trace per id, so a batch that called `store.get`
+    picked up whatever the person had done to that trace in the GUI -- an
+    ad-hoc sync offset, a half-applied fix -- and silently baked it into
+    the exported files, with nothing in the output saying so. Worse, the
+    whole-corpus run is a background thread: it was mutating and then
+    evicting the very trace the viewport was drawing.
+
+    Starting from the files makes a batch reproducible: the same corpus
+    plus the same options produces the same output regardless of what
+    anyone clicked first.
+    """
+    adma_path = store.original_adma_path(trace_id)
+    annotation_path = store.original_annotation_path(trace_id)
+    # Same contract as TraceStore.get, which callers already handle as a 404.
+    if not adma_path.exists() or not annotation_path.exists():
+        raise KeyError(trace_id)
+    return load_trace(trace_id, adma_path, annotation_path)
+
+
+def _fix_predict_and_write_output(trace_id: str, opts: FixExportOptions) -> tuple[dict, object]:
     """validate -> (optionally) fix -> (optionally) predict -> re-validate
     for one trace, then writes whichever artifacts `opts` asks for into
     output/, mirroring the input corpus layout for ADMA/annotation -- see
     export.batch_output. Shared by the single-trace endpoint below and the
     Scan Directory panel's whole-corpus "run" background job.
+
+    Returns (response payload, the processed trace) -- the trace so a
+    caller that also wants to catalog it can use this same private copy
+    rather than re-reading (or worse, reaching into the session's).
     """
-    trace = store.get(trace_id)
+    trace = _load_pristine(trace_id)
     before = run_validation(trace)
     fix_summary = apply_fixes(trace, smoothing=opts.smoothing) if opts.fix_issues else {}
     added = (
@@ -418,7 +445,7 @@ def _fix_predict_and_write_output(trace_id: str, opts: FixExportOptions) -> dict
         "predicted": added,
         "provenance": logged["provenance"],
         "output": output_paths,
-    }
+    }, trace
 
 
 @app.post("/api/traces/{trace_id}/batch_fix_predict")
@@ -429,9 +456,10 @@ def batch_fix_predict(trace_id: str, req: FixExportOptions = FixExportOptions())
     original fix+predict+export-everything-but-ADP-and-xml pipeline.
     """
     try:
-        return _fix_predict_and_write_output(trace_id, req)
+        payload, _trace = _fix_predict_and_write_output(trace_id, req)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"Unknown trace_id '{trace_id}'")
+    return payload
 
 
 BATCH_ALL_MODES = ("catalog", "run")
@@ -456,14 +484,20 @@ def _catalog_trace(trace_id: str, trace) -> None:
 
 
 def _process_one_for_batch_all(trace_id: str, mode: str, opts: FixExportOptions) -> None:
+    """Always works on a private parse (see _load_pristine), never the
+    store's cached copy: this runs on a background thread while someone is
+    using the GUI, so reading -- let alone mutating and evicting -- the
+    trace the viewport is drawing is not an option. It also keeps memory
+    bounded across a corpus of thousands for free, since nothing is
+    cached."""
     if mode == "catalog":
-        trace = store.get(trace_id)
+        trace = _load_pristine(trace_id)
         run_validation(trace)
         _catalog_trace(trace_id, trace)
     else:  # "run"
-        _fix_predict_and_write_output(trace_id, opts)
+        _payload, trace = _fix_predict_and_write_output(trace_id, opts)
         if opts.also_build_catalog:
-            _catalog_trace(trace_id, store.get(trace_id))  # already fixed + re-validated, still cached
+            _catalog_trace(trace_id, trace)  # the same processed copy, not a second parse
 
 
 def _run_batch_all(trace_ids: list[str], mode: str, opts: FixExportOptions) -> None:
@@ -476,7 +510,6 @@ def _run_batch_all(trace_ids: list[str], mode: str, opts: FixExportOptions) -> N
             with _batch_all_lock:
                 _batch_all_state["failed"].append({"trace_id": trace_id, "error": str(exc)})
         finally:
-            store.evict(trace_id)  # bounds memory across a corpus of thousands
             with _batch_all_lock:
                 _batch_all_state["done"] += 1
     with _batch_all_lock:

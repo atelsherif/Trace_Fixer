@@ -2,6 +2,31 @@
 y, at a given ego-relative x and time) from the annotated Road Edge / Guardrail
 polylines. Used by both the validation off-road check and the fix engine's
 off-road clamp so the two agree on what "on-road" means.
+
+KNOWN LIMITATION -- the corridor is compared across ego frames from
+different times, and off-road verdicts should be read with that in mind.
+
+A snapshot's `points_rel` are in the ego frame *at that snapshot's own
+time*, but they are tested against a vehicle's `x_rel`/`y_rel` from the
+observation's time, and border snapshots are sparse: the bundled samples
+carry 10 and 11 distinct snapshot times across a 60 s clip, so the median
+observation is judged against geometry 1.7-3.5 s away and the worst against
+geometry 12.6 s away. At 25 m/s that is several hundred metres of ego
+travel, plus whatever the ego rotated through. Where the road is straight
+and the ego is not turning the two frames nearly coincide and the verdict
+is sound; on a curve it is not.
+
+The principled fix is to work from the global points (`points_m`, filled by
+geo.populate) and reproject them into the ego frame of the observation being
+judged -- a road edge does not move, so once in world coordinates every
+snapshot's geometry stays valid for the whole clip. That was tried and
+backed out: it changes which edge is "innermost" often enough to flip
+verdicts (on sample2 it moved one vehicle's departure from the left side to
+the right), and with two bundled traces there is no way to tell which
+answer is the correct one. It needs a corpus with known-good off-road
+ground truth to validate against before it goes in. Until then the sparse
+comparison stays, documented, rather than being replaced by something
+equally unverified.
 """
 from __future__ import annotations
 

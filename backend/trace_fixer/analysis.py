@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 
+from trace_fixer.geo.sync import apply_offset
 from trace_fixer.geo.transform import EgoInterpolator
 from trace_fixer.models import Trace
 
@@ -38,6 +39,11 @@ SHORT_HEADWAY_S = 1.0
 NEAR_MISS_HEADWAY_S = 0.5
 MIN_SPEED_FOR_HEADWAY_MPS = 1.0
 MIN_HEADWAY_DURATION_S = 0.3
+# Flagged observations further apart than this are separate episodes, not
+# one long one. Generous next to annotation keyframe spacing (~0.4-1.2s in
+# the samples), so a single episode with a sparsely-annotated middle still
+# merges, while two genuinely separate approaches stay separate.
+MAX_HEADWAY_MERGE_GAP_S = 2.0
 
 # A "cut-in": a vehicle that was outside the ego's lane crosses into it
 # (|y_rel| drops under LANE_HALF_WIDTH_M) while already close ahead.
@@ -208,13 +214,18 @@ def detect_short_headway_events(trace: Trace) -> list[ShortHeadwayEvent]:
     if len(trace.ego.poses) < 2:
         return []
     interp = EgoInterpolator(trace.ego)
+    merge_gap_us = int(MAX_HEADWAY_MERGE_GAP_S * 1e6)
     events: list[ShortHeadwayEvent] = []
     for track in trace.annotation.vehicles.values():
         flagged: list[tuple[int, float]] = []
         for obs in sorted(track.observations, key=lambda o: o.t_us):
             if obs.x_rel <= 0 or abs(obs.y_rel) > LANE_HALF_WIDTH_M:
                 continue
-            _, _, _, speed = interp.at(obs.t_us)
+            # The annotation clock, mapped onto the ego clock -- same as
+            # every other consumer of an annotation timestamp. Sampling the
+            # ego at the raw annotation time reads the speed from the wrong
+            # instant whenever a sync offset is set.
+            _, _, _, speed = interp.at(apply_offset(obs.t_us, trace.sync_offset_us))
             if speed < MIN_SPEED_FOR_HEADWAY_MPS:
                 continue
             headway_s = obs.x_rel / speed
@@ -223,11 +234,19 @@ def detect_short_headway_events(trace: Trace) -> list[ShortHeadwayEvent]:
 
         if not flagged:
             continue
+        # Start a new event when the gap is too large to be one episode.
+        # Without this test the loop only ever extended the first group, so
+        # every approach a vehicle ever made collapsed into a single event
+        # spanning the first to the last -- two one-second tailgates forty
+        # seconds apart were reported as one forty-one-second event.
         merged: list[list] = [[flagged[0][0], flagged[0][0], flagged[0][1]]]
         for t_us, headway_s in flagged[1:]:
             last = merged[-1]
-            last[1] = t_us
-            last[2] = min(last[2], headway_s)
+            if t_us - last[1] <= merge_gap_us:
+                last[1] = t_us
+                last[2] = min(last[2], headway_s)
+            else:
+                merged.append([t_us, t_us, headway_s])
         for start, end, min_headway in merged:
             if (end - start) / 1e6 < MIN_HEADWAY_DURATION_S:
                 continue

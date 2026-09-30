@@ -718,7 +718,7 @@ and explainable rules are what an annotation QA team can act on directly.
 
 | Check | What it flags | Auto-fixed? |
 |---|---|---|
-| Kinematic (vehicles) | Implied speed / acceleration / yaw-rate between consecutive observations exceeds highway-driving thresholds | Yes — spline smoothing of position over the flagged stretch only, capped at 1 m of movement, heading re-derived from the smoothed path tangent where (and only where) the position moved |
+| Kinematic (vehicles) | Implied speed / acceleration / yaw-rate between consecutive observations exceeds highway-driving thresholds. Acceleration is a *centred* difference: the two interval speeds it compares sit half an interval either side of the observation, so the time between them is `(dt0 + dt1) / 2`. Dividing by `dt1` alone (as this used to) is right only when keyframes are evenly spaced, and overstated acceleration by `dt0/dt1` when they weren't — on sample2 that was 8 of 20 flags | Yes — spline smoothing of position over the flagged stretch only, capped at 1 m of movement, heading re-derived from the smoothed path tangent where (and only where) the position moved |
 | Kinematic (ego/ADMA) | Same, on the ADMA trace itself | No — flagged only; the ego trace is the foundation everything else is built on, so it isn't auto-edited without review |
 | Off-road | Vehicle crosses the nearest annotated Road Edge / Guardrail boundary while staying road-parallel | Yes — lateral clamp back inside the corridor (+ margin), up to 1.5 m; a larger correction than that is declined and the flag stands |
 | Road departure | Vehicle *leaves* the ego's road — an exit ramp, a turn into a side street | No — reported for review and left exactly as recorded (see below) |
@@ -1213,6 +1213,29 @@ a sharply time-compressed lateral move won't show a correspondingly
 steeper heading. Good enough for a harder/different *positional* scenario,
 not a substitute for a real vehicle dynamics model.
 
+## Batch runs start from the files, not from your session
+
+Every batch path — the trace picker's multi-select **Fix + predict
+selected**, the Scan Directory panel's whole-corpus **Run** and **Build
+Catalog** — parses each trace fresh from its `adma.csv` / `annotation.xml`
+rather than reusing the store's cached copy.
+
+That is a correctness requirement, not an optimisation. The store keeps one
+mutable `Trace` per id, which is what the GUI edits in place, so a batch
+that read the cache picked up whatever you had done to a trace first: an
+ad-hoc sync offset dragged while watching the replay would be baked into
+the exported ADMA/annotation with nothing in the output saying so. And the
+whole-corpus run is a background thread, so it was mutating — then
+evicting — the very trace the viewport was drawing.
+
+Two consequences worth knowing:
+
+- A batch is **reproducible**: the same corpus plus the same options
+  produces the same output regardless of what anyone clicked first.
+- Running a batch over the trace you currently have open does **not**
+  update the viewport. Your session's copy is left exactly as you left it;
+  the batch's result is in `output/`.
+
 ## Known limitations / scope (v1)
 
 - **OpenDRIVE defaults to using only the trace itself** — a real map
@@ -1223,13 +1246,33 @@ not a substitute for a real vehicle dynamics model.
   line runs along the ego's own driven path rather than precisely through
   the road's true center, and curvature is a sequence of constant-curvature
   arcs fit to real heading, not full clothoid continuity.
-- **Prediction is per-vehicle** (both directions), using a constant-speed,
-  lane-tangent-following model. It doesn't reason about other traffic, so
-  two independently-predicted vehicles can end up flagged as colliding —
-  that's a real signal ("these two tracks are ambiguous while unobserved"),
-  not a bug, and is left for manual review rather than silently resolved.
+- **Prediction uses a constant-speed, lane-tangent-following model** with a
+  speed-only following-distance governor. It does not steer, so a conflict
+  closing faster than plausible braking can resolve still surfaces as a
+  collision — a real signal ("these two tracks are ambiguous while
+  unobserved"), left for review rather than silently resolved.
 - **Ego (ADMA) trace fixes are flag-only** in v1 (see table above).
 - Lane markings/road edges are stored in the annotation as sparse
   ego-relative keyframes (not one per frame); the GUI renders the union of
   all keyframe snapshots as static road geometry, which is a good
   approximation but not a continuously-updated live corridor.
+- **The off-road check compares ego frames from different times.** This is
+  the biggest known soft spot, and it is worth reading the caveat at the
+  top of `geo/road_corridor.py` before trusting an `off_road` or
+  `road_departure` verdict on a curve. A border snapshot's `points_rel` are
+  in the ego frame at *that snapshot's* time, but they are tested against a
+  vehicle's `y_rel` from the observation's time — and snapshots are sparse:
+  on the bundled samples the median observation is judged against geometry
+  1.7–3.5 s away, the worst against geometry 12.6 s away, which at 25 m/s
+  is several hundred metres of ego travel plus whatever the ego rotated
+  through. Where the road is straight the two frames nearly coincide and
+  the verdict is sound; on a curve it is not.
+
+  The principled fix is to reproject the stored *global* border points
+  (`points_m`) into the ego frame of the observation being judged — a road
+  edge does not move, so in world coordinates every snapshot stays valid
+  for the whole clip. That was tried and backed out: it flips verdicts
+  often enough to matter (on sample2 it moved one vehicle's departure from
+  the left side to the right), and two bundled traces are not enough to
+  tell which answer is correct. It needs a corpus with known-good off-road
+  ground truth before it goes in.

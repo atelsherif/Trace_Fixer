@@ -225,33 +225,59 @@ def scan_for_trace_pairs(root: Path) -> ScanResult:
     xml_duplicate_examples: list[str] = []
     unmatched_xml_count = 0
 
-    for stem, xml_path in xml_files:
+    def _exact_name(stem: str) -> str | None:
         stripped = _strip_known_suffix(stem)
-        trace_name = stripped if stripped in adma_by_name else None
+        return stripped if stripped in adma_by_name else None
 
-        if trace_name is None:
-            idx = bisect.bisect_right(lower_sorted_names, stem.lower())
-            for j in range(idx - 1, max(-1, idx - 1 - _PREFIX_FALLBACK_WINDOW), -1):
-                candidate = sorted_names[j]
-                if stem.lower().startswith(candidate.lower()):
-                    trace_name = candidate
-                    break
+    def _fallback_name(stem: str) -> str | None:
+        idx = bisect.bisect_right(lower_sorted_names, stem.lower())
+        for j in range(idx - 1, max(-1, idx - 1 - _PREFIX_FALLBACK_WINDOW), -1):
+            candidate = sorted_names[j]
+            if stem.lower().startswith(candidate.lower()):
+                return candidate
+        return None
 
+    # Two passes, exact-suffix before prefix-fallback, and each pass sorted
+    # by path. Resolving each file where it was found meant an approximate
+    # match could claim a trace name that the *exact* annotation for that
+    # trace then lost to as a "duplicate", purely because the filesystem
+    # walk reached it first -- and since os.scandir order is not defined,
+    # which file a trace got paired with could differ between two scans of
+    # the same corpus. Sorting also makes the duplicate that does get
+    # dropped a stable, reportable one rather than an arbitrary one.
+    resolved: list[tuple[str | None, str, Path]] = []
+    for stem, xml_path in xml_files:
+        resolved.append((_exact_name(stem), stem, xml_path))
+
+    def _claim(trace_name: str, xml_path: Path) -> None:
+        nonlocal xml_duplicate_count
+        if trace_name not in matched:
+            matched[trace_name] = (adma_by_name[trace_name], xml_path)
+            return
+        # A real match, just not the first one -- e.g. a duplicate/
+        # reprocessed annotation export for a trace already claimed.
+        # Never surfaced any other way, since it's not "unmatched".
+        xml_duplicate_count += 1
+        if len(xml_duplicate_examples) < _MAX_UNMATCHED_EXAMPLES:
+            xml_duplicate_examples.append(
+                f"{xml_path} (dropped; trace name '{trace_name}' already claimed by {matched[trace_name][1]})"
+            )
+
+    for trace_name, _stem, xml_path in sorted(
+        ((n, s, p) for n, s, p in resolved if n is not None), key=lambda r: str(r[2])
+    ):
+        _claim(trace_name, xml_path)
+
+    for _none, stem, xml_path in sorted(
+        ((n, s, p) for n, s, p in resolved if n is None), key=lambda r: str(r[2])
+    ):
+        trace_name = _fallback_name(stem)
         if trace_name is None:
             unmatched_xml_count += 1
             if len(unmatched_xml_examples) < _MAX_UNMATCHED_EXAMPLES:
                 unmatched_xml_examples.append(xml_path.name)
-        elif trace_name not in matched:
-            matched[trace_name] = (adma_by_name[trace_name], xml_path)
         else:
-            # A real match, just not the first one -- e.g. a duplicate/
-            # reprocessed annotation export for a trace already claimed.
-            # Never surfaced any other way, since it's not "unmatched".
-            xml_duplicate_count += 1
-            if len(xml_duplicate_examples) < _MAX_UNMATCHED_EXAMPLES:
-                xml_duplicate_examples.append(
-                    f"{xml_path} (dropped; trace name '{trace_name}' already claimed by {matched[trace_name][1]})"
-                )
+            _claim(trace_name, xml_path)
 
     unmatched_adma = [name for name in sorted_names if name not in matched]
     return ScanResult(

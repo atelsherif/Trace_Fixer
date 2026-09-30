@@ -146,6 +146,17 @@ def _initial_speed_heading(anchor: VehicleObs, neighbor: VehicleObs) -> tuple[fl
     return speed, heading
 
 
+# How quickly a predicted box's *orientation* converges from the anchor's
+# annotated heading onto its direction of travel. Same shape as STEER_BLEND,
+# but rate-limited for the same reason the collision governor's braking is:
+# kept under validation's own YAW_RATE_MEDIUM_DEG_S (15.0 deg/s) so closing
+# the gap between the annotated box angle and the direction of travel can
+# never itself be flagged as an implausible yaw rate. A 19 deg disagreement
+# -- the worst on the bundled samples -- takes about 2 s to absorb.
+BOX_HEADING_BLEND = STEER_BLEND
+BOX_HEADING_RATE_DEG_S = 10.0
+
+
 class _SceneBoxes:
     """Where everything in the scene is at a given instant -- the ego plus
     every vehicle's box -- for the collision-avoiding speed governor below.
@@ -251,6 +262,18 @@ class _Extrapolator:
         self._cruise_speed = speed
         self._speed = speed
         self._heading = heading
+        # Where the *box* points, tracked separately from where the vehicle
+        # is going. They are not the same thing: `heading` comes from the
+        # direction of travel between the anchor and its neighbour, while
+        # the anchor's own annotated heading is the labelled box angle, and
+        # the two disagree by whatever heading error the annotation carries
+        # (up to 19 deg on sample2). Emitting the travel direction from the
+        # very first predicted step put that entire disagreement into one
+        # 0.2 s step -- a ~95 deg/s yaw rate the validator then flagged, at
+        # every single real/predicted seam. So the box starts where the
+        # annotation left it and converges onto the direction of travel,
+        # while the vehicle still *moves* along `heading` throughout.
+        self._box_heading = math.radians(anchor.heading_deg)
         self._x, self._y = anchor.x_m, anchor.y_m
         self._distance = 0.0
         self._t_cursor = anchor.t_us + self._step_us
@@ -338,6 +361,9 @@ class _Extrapolator:
             self._x, self._y = self._step_to(self._speed)
 
         self._distance += abs(self._speed) * self._step_s
+        turn = BOX_HEADING_BLEND * _wrap_rad(self._heading - self._box_heading)
+        max_turn = math.radians(BOX_HEADING_RATE_DEG_S) * self._step_s
+        self._box_heading += max(-max_turn, min(max_turn, turn))
         t_ego_us = apply_offset(self._t_cursor, self._trace.sync_offset_us)
         ex, ey, eyaw, _ = self._interp.at(t_ego_us)
         x_rel, y_rel = global_to_ego_relative(self._x, self._y, ex, ey, eyaw)
@@ -354,10 +380,10 @@ class _Extrapolator:
             length=self.anchor.length,
             width=self.anchor.width,
             height=self.anchor.height,
-            zrot=global_heading_to_zrot(self._heading, eyaw),
+            zrot=global_heading_to_zrot(self._box_heading, eyaw),
             x_m=self._x,
             y_m=self._y,
-            heading_deg=math.degrees(self._heading) % 360,
+            heading_deg=math.degrees(self._box_heading) % 360,
             synthetic=True,
         )
         self.out.append(obs)

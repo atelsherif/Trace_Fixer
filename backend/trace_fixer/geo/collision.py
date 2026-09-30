@@ -44,15 +44,11 @@ def obb_overlap(
     return True
 
 
-def obb_overlap_area_fraction(
-    x1: float, y1: float, heading1_deg: float, length1: float, width1: float,
-    x2: float, y2: float, heading2_deg: float, length2: float, width2: float,
-) -> float:
-    """Cheap overlap-severity proxy: 1.0 if centers coincide, 0.0 at first separating gap.
-    Not a true polygon-intersection area -- used only to rank/severity-classify collisions.
-    """
-    dist = math.hypot(x2 - x1, y2 - y1)
-    combined_half_diag = (math.hypot(length1, width1) + math.hypot(length2, width2)) / 4.0
-    if combined_half_diag <= 0:
-        return 0.0
-    return max(0.0, min(1.0, 1.0 - dist / combined_half_diag))
+# `obb_overlap_area_fraction` used to live here: a "cheap overlap-severity
+# proxy" that nothing ever called, and whose arithmetic was wrong anyway --
+# it summed two boxes' full diagonals and divided by 4, giving the *average*
+# half-diagonal where the sum of the two half-diagonals was intended, so
+# every severity it produced was computed against a reach half the real one.
+# Deleted rather than fixed: an unused function with a subtly wrong formula
+# is a trap for whoever reaches for it next, and collision severity is
+# currently (correctly) decided by obb_overlap alone.
