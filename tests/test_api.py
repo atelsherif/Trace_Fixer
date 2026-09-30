@@ -136,7 +136,11 @@ def test_batch_fix_predict_runs_full_pipeline(client_with_corpus):
     data = r.json()
     assert data["trace_id"] == names[0]
     assert data["before_issue_count"] == 0  # this corpus is copies of sample1, which is issue-free pre-fix
-    assert len(data["fix_summary"]) == 5  # one line per vehicle in the sample trace
+    # ...and because it is issue-free, the fix engine has nothing to report:
+    # smoothing only touches stretches validation flagged (see
+    # validation.fixes), so a clean trace comes back untouched rather than
+    # reshaped track by track.
+    assert data["fix_summary"] == []
     assert set(data["predicted"].keys()) == {"1", "2", "3", "4", "5"}
 
     # scene reflects the fix: re-fetching and re-validating finds nothing new
@@ -152,8 +156,10 @@ def test_batch_fix_predict_runs_full_pipeline(client_with_corpus):
     report_out = Path(out["report_txt_path"])
     # ...under one provenance suffix shared by every artifact of this run,
     # so the whole set stays identifiable as "the fixed+predicted export"
-    sfx = "__fixed__predicted"
-    assert data["provenance"] == "fixed + predicted"
+    # sample1 is issue-free, so the fix step correctly changes nothing and
+    # only prediction shows up in the provenance.
+    sfx = "__predicted"
+    assert data["provenance"] == "predicted"
     assert adma_out == output_dir / "adma" / "ADMA" / names[0] / f"adma{sfx}.csv"
     assert annotation_out.parent == output_dir / "annotations" / "Annotations"
     assert annotation_out.name.endswith(f"{sfx}.xml")
@@ -218,8 +224,13 @@ def test_individual_export_endpoints_write_to_output_and_report_the_path(client_
 
 
 def test_exports_of_different_trace_states_do_not_overwrite_each_other(client_with_corpus):
-    """Exporting, applying fixes, then exporting again must leave two files
-    that say which is which -- not one file of ambiguous origin."""
+    """Exporting, changing the trace, then exporting again must leave two files
+    that say which is which -- not one file of ambiguous origin.
+
+    Prediction rather than fixing is what moves this corpus off "original":
+    it is copies of sample1, which validation finds nothing wrong with, so
+    Apply fixes on it is a genuine no-op (see validation.fixes).
+    """
     client, names, output_dir = client_with_corpus
     trace_id = names[0]
 
@@ -228,12 +239,15 @@ def test_exports_of_different_trace_states_do_not_overwrite_each_other(client_wi
 
     client.post(f"/api/traces/{trace_id}/validate")
     client.post(f"/api/traces/{trace_id}/fix")
+    assert client.get(f"/api/traces/{trace_id}/export/opendrive").json()["provenance"] == "original"
+
+    client.post(f"/api/traces/{trace_id}/predict", json={})
     r = client.get(f"/api/traces/{trace_id}/export/opendrive")
-    assert r.json()["provenance"] == "fixed"
+    assert r.json()["provenance"] == "predicted"
 
     scenarios = output_dir / "scenarios" / trace_id
     assert (scenarios / f"{trace_id}.xodr").exists()
-    assert (scenarios / f"{trace_id}__fixed.xodr").exists()
+    assert (scenarios / f"{trace_id}__predicted.xodr").exists()
 
 
 def test_exports_endpoint_lists_what_was_written_newest_first(client_with_corpus):
@@ -361,8 +375,8 @@ def test_batch_all_processes_every_registered_trace(client_with_corpus):
     assert status["done"] == 3
     assert status["failed"] == []
     for name in names:
-        assert (output_dir / "adma" / "ADMA" / name / "adma__fixed__predicted.csv").exists()
-        assert (output_dir / "reports" / name / f"{name}_summary__fixed__predicted.txt").exists()
+        assert (output_dir / "adma" / "ADMA" / name / "adma__predicted.csv").exists()
+        assert (output_dir / "reports" / name / f"{name}_summary__predicted.txt").exists()
 
 
 def test_batch_all_rejects_concurrent_start(client_with_corpus):
@@ -415,7 +429,7 @@ def test_batch_all_fix_catalog_mode_does_both(client_with_corpus):
     assert status["failed"] == []
 
     for name in names:
-        assert (output_dir / "adma" / "ADMA" / name / "adma__fixed__predicted.csv").exists()
+        assert (output_dir / "adma" / "ADMA" / name / "adma__predicted.csv").exists()
 
     r = client.get("/api/catalog")
     data = r.json()
@@ -441,7 +455,7 @@ def test_batch_all_run_mode_only_writes_the_selected_export_types(client_with_co
     assert r.status_code == 200
     _wait_for_batch_done(client)
 
-    sfx = "__fixed__predicted"
+    sfx = "__predicted"  # sample1 is issue-free: nothing for the fix step to change
     assert not (output_dir / "adma").exists()
     assert not (output_dir / "annotations").exists()
     for name in names:

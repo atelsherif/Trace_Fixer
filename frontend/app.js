@@ -13,6 +13,7 @@ const state = {
   selectedVehicleId: null,
   selectedStaticObjectId: null,
   showLanes: true,
+  showRoadEdges: true,
   showStatic: false,
   showOriginal: false,
   showMapOverlay: false,
@@ -493,8 +494,8 @@ function draw() {
 
   if (state.showMapOverlay && state.mapOverlay) drawMapOverlay(ctx, state.mapOverlay.ways, lineWidthWorld);
 
-  if (state.showLanes) drawLines(ctx, state.scene.lane_markings, "#4a5568", lineWidthWorld, false);
-  drawLines(ctx, state.scene.border_lines, "#c98a3c", lineWidthWorld * 1.6, true);
+  if (state.showLanes) drawLines(ctx, state.scene.lane_markings, LANE_COLOR, lineWidthWorld, false);
+  if (state.showRoadEdges) drawRoadEdges(ctx, state.scene.border_lines, lineWidthWorld);
 
   if (state.showStatic) drawStatic(ctx, state.scene.static_objects, lineWidthWorld, state.selectedStaticObjectId);
 
@@ -670,6 +671,70 @@ function drawTrail(ctx, observations, tNow, color, lineWidthWorld) {
     ctx.moveTo(recent[i - 1].x, recent[i - 1].y);
     ctx.lineTo(recent[i].x, recent[i].y);
     ctx.stroke();
+  }
+  ctx.restore();
+}
+
+const LANE_COLOR = "#4a5568";  // keep in sync with --lane-color
+const ROAD_EDGE_COLOR = "#c98a3c";  // keep in sync with --road-edge-color
+const HATCH_SPACING_M = 4.0;
+const HATCH_LENGTH_M = 1.1;
+
+/** The annotated Road Edge / Guardrail polylines -- the limit of the drivable
+ * corridor, and the line every off-road flag is measured against.
+ *
+ * These used to be drawn as a plain amber dashed line, which read as "some
+ * kind of lane marking" and told you nothing: reviewers couldn't say what the
+ * line meant, let alone which side of it was road. Now they are solid (dashes
+ * mean "lane marking" everywhere else in traffic engineering, so spending
+ * them here was actively misleading) and carry short ticks on their off-road
+ * side, the standard map convention for an embankment or a barrier. Which
+ * side that is comes from the scene payload's per-snapshot `side`, since the
+ * polyline alone can't say which of its flanks is tarmac. */
+function drawRoadEdges(ctx, lineGroups, lineWidthWorld) {
+  ctx.save();
+  ctx.strokeStyle = ROAD_EDGE_COLOR;
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  for (const group of lineGroups) {
+    for (const snap of group.snapshots) {
+      const pts = snap.points;
+      if (pts.length < 2) continue;
+
+      ctx.lineWidth = lineWidthWorld * 1.8;
+      ctx.beginPath();
+      ctx.moveTo(pts[0][0], pts[0][1]);
+      for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0], pts[i][1]);
+      ctx.stroke();
+
+      // "left" means the edge sits to the ego's left, so the road is to its
+      // right and the ticks point left -- hence the sign flip.
+      const outward = snap.side === "left" ? 1 : -1;
+      ctx.lineWidth = lineWidthWorld;
+      ctx.globalAlpha = 0.75;
+      ctx.beginPath();
+      let sinceTick = 0;
+      for (let i = 1; i < pts.length; i++) {
+        const [x0, y0] = pts[i - 1];
+        const [x1, y1] = pts[i];
+        const seg = Math.hypot(x1 - x0, y1 - y0);
+        if (seg < 1e-6) continue;
+        // Tick normal is the segment direction rotated 90 deg; `outward`
+        // picks which of the two normals points away from the road.
+        const nx = (-(y1 - y0) / seg) * outward;
+        const ny = ((x1 - x0) / seg) * outward;
+        for (let d = HATCH_SPACING_M - sinceTick; d < seg; d += HATCH_SPACING_M) {
+          const t = d / seg;
+          const px = x0 + (x1 - x0) * t;
+          const py = y0 + (y1 - y0) * t;
+          ctx.moveTo(px, py);
+          ctx.lineTo(px + nx * HATCH_LENGTH_M, py + ny * HATCH_LENGTH_M);
+        }
+        sinceTick = (sinceTick + seg) % HATCH_SPACING_M;
+      }
+      ctx.stroke();
+      ctx.globalAlpha = 1;
+    }
   }
   ctx.restore();
 }
@@ -1317,6 +1382,7 @@ function wireControls() {
   el("heading-up").addEventListener("change", (e) => { state.camera.headingUp = e.target.checked; draw(); });
   el("gps-readout").addEventListener("click", copyGpsReadout);
   el("show-lanes").addEventListener("change", (e) => { state.showLanes = e.target.checked; draw(); });
+  el("show-road-edges").addEventListener("change", (e) => { state.showRoadEdges = e.target.checked; draw(); });
   el("show-static").addEventListener("change", (e) => { state.showStatic = e.target.checked; draw(); });
   el("show-original").addEventListener("change", (e) => {
     state.showOriginal = e.target.checked;
@@ -1438,9 +1504,10 @@ function wireControls() {
 
   el("btn-fix").addEventListener("click", async () => {
     setStatus("Applying fixes…");
-    const res = await apiPost(`/api/traces/${state.traceId}/fix`);
+    const smoothing = el("fix-smoothing").value;
+    const res = await apiPost(`/api/traces/${state.traceId}/fix`, { smoothing });
     applyScene(res.scene);
-    setStatus(res.summary.length ? res.summary.join("\n") : "No fixes were needed.");
+    setStatus(res.summary.length ? res.summary.join("\n") : "Nothing needed fixing — the trace is left exactly as recorded.");
   });
 
   el("btn-reset").addEventListener("click", async () => {
@@ -1525,6 +1592,8 @@ function wireControls() {
   });
 }
 
+const MAX_SUBTREES_LISTED = 12;
+
 async function runScan() {
   const path = el("scan-path").value.trim();
   if (!path) return;
@@ -1554,9 +1623,16 @@ async function runScan() {
     }
     const subtrees = Object.entries(data.adma_files_by_subtree || {});
     if (subtrees.length) {
+      // A corpus root can have hundreds of top-level folders; listing them
+      // all turns the status area into a wall of text. The biggest few are
+      // what tell you whether the walk reached the right places.
       subtrees.sort((a, b) => b[1] - a[1]);
+      const shown = subtrees.slice(0, MAX_SUBTREES_LISTED);
+      const rest = subtrees.length - shown.length;
       parts.push(
-        `adma.csv per top-level folder: ` + subtrees.map(([k, v]) => `${k}=${v}`).join(", ")
+        `adma.csv per top-level folder: ` +
+          shown.map(([k, v]) => `${k}=${v}`).join(", ") +
+          (rest > 0 ? `, and ${rest} more folder(s)` : "")
       );
     }
     if (data.dirs_visited) {

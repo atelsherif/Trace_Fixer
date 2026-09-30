@@ -27,6 +27,10 @@
   /* Deliberately not one of the four trajectory colours above: the
      pre-fix overlay is a reference, not another class of vehicle. */
   --original-color: #9aa5b8;
+  /* Road furniture, held apart from the trajectory palette so a road edge
+     is never mistaken for a vehicle of some kind. */
+  --lane-color: #4a5568;
+  --road-edge-color: #c98a3c;
   --radius: 9px;
   --radius-sm: 6px;
   --shadow-lift: 0 1px 2px rgba(0, 0, 0, 0.4);
@@ -307,6 +311,24 @@ body {
   font-size: 12px;
   color: var(--text-dim);
   white-space: pre-wrap;
+  /* A scan report quotes absolute paths, which have no spaces to wrap at --
+     without this they run straight out of the panel and off the window.
+     `anywhere` rather than `break-word` so an over-long path also stops the
+     panel from being widened by its own content. */
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  /* And the report itself can run to dozens of lines (per-subtree counts,
+     unreadable-directory examples): scroll it here rather than growing the
+     panel past the bottom of the screen. */
+  max-height: 40vh;
+  overflow-y: auto;
+}
+
+/* The panels drop from the top bar, so their own height is what pushes
+   content off-screen. Cap them against the viewport and scroll inside. */
+.trace-picker-panel, .scan-panel {
+  max-height: calc(100vh - 90px);
+  overflow-y: auto;
 }
 
 .scan-path-row {
@@ -596,6 +618,11 @@ body {
   justify-content: space-between;
   align-items: flex-start;
   pointer-events: none;
+  /* The toggles and the legend both grow as entries are added; on a narrow
+     viewport they used to collide and spill past the canvas. Let the legend
+     drop onto its own row instead. */
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 /* The overlays float over live canvas, so they're frosted rather than
@@ -611,10 +638,12 @@ body {
 .viewport-controls {
   pointer-events: auto;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 7px;
   padding: 7px 9px;
   border-radius: var(--radius);
+  min-width: 0;
 }
 
 .viewport-controls button {
@@ -627,14 +656,16 @@ body {
 .legend {
   pointer-events: auto;
   display: flex;
-  gap: 13px;
+  flex-wrap: wrap;
+  gap: 6px 13px;
   padding: 7px 11px;
   border-radius: var(--radius);
   font-size: 11.5px;
   color: var(--text-dim);
+  margin-left: auto;  /* stays hard right even after wrapping onto its own row */
 }
 
-.legend span { display: flex; align-items: center; gap: 5px; }
+.legend span { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
 
 .map-overlay-status {
   font-size: 11px;
@@ -677,6 +708,31 @@ body {
   color: var(--original-color);
   border: 1px dashed currentColor;
   box-shadow: none;
+}
+/* Road furniture reads as a line, not a blob -- these stand for polylines
+   on the canvas, not for objects. */
+.swatch.lane, .swatch.road-edge {
+  width: 14px;
+  height: 0;
+  border-radius: 0;
+  box-shadow: none;
+  background: transparent;
+}
+.swatch.lane { border-top: 2px solid var(--lane-color); }
+/* Solid line with a tick hanging off it, matching the hatched off-road side
+   drawn on the canvas. */
+.swatch.road-edge {
+  position: relative;
+  border-top: 2px solid var(--road-edge-color);
+}
+.swatch.road-edge::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 0;
+  width: 0;
+  height: 4px;
+  border-left: 2px solid var(--road-edge-color);
 }
 .legend span.hidden { display: none; }
 

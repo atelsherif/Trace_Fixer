@@ -11,7 +11,8 @@ from __future__ import annotations
 import math
 
 from trace_fixer.geo.collision import obb_overlap
-from trace_fixer.geo.road_corridor import corridor_bounds
+from trace_fixer.geo.road_corridor import OFFROAD_MARGIN_M
+from trace_fixer.geo.road_departure import offroad_runs
 from trace_fixer.geo.transform import EgoInterpolator
 from trace_fixer.models import Issue, Trace, VehicleTrack
 
@@ -22,7 +23,10 @@ ACCEL_MEDIUM_MPS2 = 6.0
 ACCEL_HIGH_MPS2 = 12.0
 YAW_RATE_MEDIUM_DEG_S = 15.0
 YAW_RATE_HIGH_DEG_S = 40.0
-OFFROAD_MARGIN_M = 0.3
+# OFFROAD_MARGIN_M is imported above rather than defined here: geo.road_corridor
+# owns it now that the departure classifier needs the same margin without
+# importing the validator. Re-exported so `from ...checks import
+# OFFROAD_MARGIN_M` keeps working.
 
 EGO_LENGTH_M = 4.9
 EGO_WIDTH_M = 1.9
@@ -211,28 +215,51 @@ def _nearest(times: list[int], by_t: dict, t_us: int, max_dt_us: int):
 
 
 def _offroad_checks(trace: Trace, counter: list[int]) -> list[Issue]:
+    """Two outcomes, not one. A box that sits slightly outside the annotated
+    edge while staying road-parallel is an annotation error the fix engine can
+    clamp back in ("off_road"). A vehicle that turned off the road -- an exit,
+    a right into a side street -- is outside the corridor because the corridor
+    only describes the ego's road, and correcting it would fabricate a
+    trajectory ("road_departure": reported, never auto-corrected). See
+    geo.road_departure for the discriminator.
+    """
     issues: list[Issue] = []
     for track in trace.annotation.vehicles.values():
-        flags: list[tuple[int, int, str]] = []
-        for obs in track.observations:
-            left, right = corridor_bounds(trace.annotation.border_lines, obs.t_us, obs.x_rel)
-            half_w = obs.width / 2.0
-            if left is not None and obs.y_rel - half_w > left - OFFROAD_MARGIN_M:
-                flags.append((obs.t_us, obs.t_us, "left"))
-            elif right is not None and obs.y_rel + half_w < right + OFFROAD_MARGIN_M:
-                flags.append((obs.t_us, obs.t_us, "right"))
-        for start, end, side in _merge_intervals(flags):
-            issues.append(
-                Issue(
-                    issue_id=_next_id(counter),
-                    category="off_road",
-                    severity="medium",
-                    vehicle_id=track.obj_id,
-                    t_start_us=start,
-                    t_end_us=end,
-                    description=f"Vehicle {track.obj_id} crosses the {side} road edge/guardrail boundary.",
+        for run in offroad_runs(track, trace.annotation.border_lines):
+            if run.is_departure:
+                issues.append(
+                    Issue(
+                        issue_id=_next_id(counter),
+                        category="road_departure",
+                        severity="low",
+                        vehicle_id=track.obj_id,
+                        t_start_us=run.t_start_us,
+                        t_end_us=run.t_end_us,
+                        description=(
+                            f"Vehicle {track.obj_id} leaves the annotated road to the {run.side} "
+                            f"(peaks {run.peak_m:.1f} m beyond the edge, {run.turn_deg:.0f}° off its earlier "
+                            "course) — reads as a real exit/turn-off, so it is left exactly as recorded. "
+                            "The annotation only maps the ego's own road, so there is no corridor out there "
+                            "to check it against."
+                        ),
+                        fixable=False,
+                    )
                 )
-            )
+            else:
+                issues.append(
+                    Issue(
+                        issue_id=_next_id(counter),
+                        category="off_road",
+                        severity="medium",
+                        vehicle_id=track.obj_id,
+                        t_start_us=run.t_start_us,
+                        t_end_us=run.t_end_us,
+                        description=(
+                            f"Vehicle {track.obj_id} crosses the {run.side} road edge/guardrail boundary "
+                            f"by up to {run.peak_m:.1f} m while staying road-parallel."
+                        ),
+                    )
+                )
     return issues
 
 

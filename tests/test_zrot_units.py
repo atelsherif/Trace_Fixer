@@ -166,15 +166,29 @@ def test_sample2_heading_matches_travel_direction_before_fixing():
     assert _mean_heading_error(trace) < 15.0
 
 
-def test_sample2_fix_engine_brings_heading_close_to_travel_direction():
+def test_sample2_fix_engine_improves_heading_agreement_without_flattening_the_track():
+    """The fix engine re-derives heading from the smoothed path tangent, which
+    tightens the agreement between stored heading and direction of travel --
+    but only where validation flagged the track as implausible.
+
+    It used to rewrite every heading on every track from the path tangent,
+    which drove this error under 3 deg by simply discarding the annotated box
+    orientation everywhere. That is not a repair: a vehicle whose real path
+    isn't perfectly straight is not a defect, and erasing its attitude
+    wholesale makes the trace less faithful, not more. So the bar here is
+    "measurably better than as-recorded, and never worse", not "flat".
+    """
     from trace_fixer.scene import load_trace
     from trace_fixer.validation.checks import run_validation
     from trace_fixer.validation.fixes import apply_fixes
 
     trace = load_trace("sample2", SAMPLE2_DIR / "adma.csv", SAMPLE2_DIR / "annotation.xml")
+    before = _mean_heading_error(trace)
     run_validation(trace)
     apply_fixes(trace)
-    assert _mean_heading_error(trace) < 3.0
+    after = _mean_heading_error(trace)
+    assert after < before
+    assert after < 10.0
 
 
 def test_export_writes_back_degrees_not_radians(tmp_path):

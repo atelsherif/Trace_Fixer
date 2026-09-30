@@ -225,11 +225,34 @@ from a single frame without scrubbing.
    alternative scenario, the ghost still shows the original annotation
    rather than an intermediate state. The checkbox stays disabled (with a
    tooltip saying why) until there is something to compare against.
+
+   **Road edges** and **Lanes** toggle the two kinds of annotated road
+   geometry, and both now appear in the legend with a tooltip saying what
+   they are. Road edges are drawn as a **solid amber line with short ticks
+   on its off-road side** — the map convention for an embankment or
+   barrier. They used to be a plain amber dashed line, which read as "some
+   kind of lane marking" (dashes mean exactly that everywhere else in
+   traffic engineering) and said nothing about which of its two flanks was
+   tarmac. This is the line every `off_road` issue is measured against, so
+   being able to see at a glance where it runs and which side is road is
+   worth the ticks.
 8. **Apply fixes** smooths flagged vehicle tracks, clamps positions back
    inside the annotated road corridor, and drops trailing observations that
    still overlap the ego vehicle after smoothing (a common "lost the track
    right as it merged into our lane" artifact). Re-run validation any time
    to see what's left.
+
+   Two limits keep it from editing away real driving. **Smoothing** (the
+   dropdown: off / light / standard / strong) only touches the stretches
+   validation actually flagged as kinematically implausible, tapers back
+   into the recorded path at their edges, and can never move an observation
+   more than a meter — a vehicle that simply isn't travelling in a perfectly
+   straight line is not a defect, and is left exactly as recorded. And the
+   corridor clamp **nudges, it never relocates**: a vehicle that has left the
+   ego's road is reported as a `road_departure` for review rather than
+   dragged back into the ego's lane (see *Off-road vs. road departure*).
+   Fixing an already-clean trace is a genuine no-op — no edits, no `__fixed`
+   suffix on its exports.
 9. **Sync offset** nudges the annotation clock against the ADMA clock (see
    *Time alignment* below) — drag while watching the replay.
 10. **Export**, one artifact type per button: **Fixed Trace
@@ -431,7 +454,7 @@ small SQLite database at `output/catalog.sqlite`, populated three ways:
   road type / weather / light conditions (read from the annotation file's
   per-frame metadata, when present), a set of **phenomenon** tags, and
   **issue** counts by category and severity (the same categories the issue
-  list uses: `kinematic`, `collision`, `off_road`, `sync`).
+  list uses: `kinematic`, `collision`, `off_road`, `road_departure`, `sync`).
 
 Phenomena are behavioral tags detected the same way the trace summary
 report's braking/overtake events are (see below), plus five more added
@@ -551,11 +574,15 @@ backend/trace_fixer/
                                for scene/validation/prediction/fix/export
   geo/sync.py                 ADMA-clock <-> annotation-clock offset
   geo/road_corridor.py        derives drivable-corridor bounds from the
-                               annotated Road Edge / Guardrail polylines
+                               annotated Road Edge / Guardrail polylines,
+                               and how far outside them a box reaches
+  geo/road_departure.py       tells a real turn-off from annotation noise,
+                               so the clamp never "corrects" a vehicle that
+                               genuinely left the ego's road
   geo/collision.py            oriented-bounding-box overlap test (SAT)
   validation/checks.py        kinematic feasibility, collision, off-road
-  validation/fixes.py         smoothing, off-road clamp, trailing-collision
-                               trim
+  validation/fixes.py         targeted/bounded smoothing, off-road clamp,
+                               trailing-collision trim
   prediction/extrapolate.py   backward, lane-following trajectory prediction
   analysis.py                 object counts, ego braking/overtake/short-
                                headway/cut-in/standstill/sharp-turn events --
@@ -661,11 +688,53 @@ and explainable rules are what an annotation QA team can act on directly.
 
 | Check | What it flags | Auto-fixed? |
 |---|---|---|
-| Kinematic (vehicles) | Implied speed / acceleration / yaw-rate between consecutive observations exceeds highway-driving thresholds | Yes — spline smoothing of position, heading re-derived from the smoothed path tangent |
+| Kinematic (vehicles) | Implied speed / acceleration / yaw-rate between consecutive observations exceeds highway-driving thresholds | Yes — spline smoothing of position over the flagged stretch only, capped at 1 m of movement, heading re-derived from the smoothed path tangent where (and only where) the position moved |
 | Kinematic (ego/ADMA) | Same, on the ADMA trace itself | No — flagged only; the ego trace is the foundation everything else is built on, so it isn't auto-edited without review |
-| Off-road | Vehicle crosses the nearest annotated Road Edge / Guardrail boundary | Yes — lateral clamp back inside the corridor (+ margin) |
+| Off-road | Vehicle crosses the nearest annotated Road Edge / Guardrail boundary while staying road-parallel | Yes — lateral clamp back inside the corridor (+ margin), up to 1.5 m; a larger correction than that is declined and the flag stands |
+| Road departure | Vehicle *leaves* the ego's road — an exit ramp, a turn into a side street | No — reported for review and left exactly as recorded (see below) |
 | Collision (vehicle↔ego) | Bounding boxes overlap | Trailing overlaps (track ends inside the ego box — a common "lost track as it merged" artifact) are trimmed. Mid-track overlaps are flagged only |
 | Collision (vehicle↔vehicle) | Bounding boxes overlap | Flagged only (no auto-fix — resolving which of two vehicles is "wrong" isn't well-defined without more context, including between two independently-predicted pre-FOV segments) |
+
+### Off-road vs. road departure
+
+The annotated Road Edge / Guardrail polylines describe **the ego's own road
+and nothing else**. Nothing in the annotation maps the side street a vehicle
+turns into, or the exit ramp it takes. So "outside the corridor" covers two
+completely different situations, and the fix engine must not treat them the
+same way:
+
+* **Annotation noise** — a box placed slightly outside the edge while the
+  vehicle is plainly still on the road, road-parallel, coming back a frame
+  or two later. This is what the corridor clamp exists for.
+* **A real departure** — the vehicle left. The corridor ends because the
+  *mapping* ends, not because the vehicle did something impossible.
+
+Clamping the second case produces a repaired trace in which a vehicle
+dutifully follows the ego down a road it had already left. That is a worse
+artifact than the flag it replaced, and it is invisible unless you happen to
+scrub to the right moment — so it ships as its own category instead.
+
+`geo/road_departure.py` classifies each unbroken off-corridor **run** (not
+each observation — one turn-off is one event, not thirty rows) as a
+departure when any of these hold:
+
+* it reaches 4 m or more beyond the edge — no plausible lateral annotation
+  error puts a box that far out while it is really in the ego's lane;
+* it reaches 2 m beyond the edge **and never returns** before the track ends
+  — it left and went out of sensor range, which is what a turn-off looks
+  like;
+* it reaches 2 m beyond the edge **and the vehicle turned 10°+ off the
+  course it was holding beforehand**. The turn is measured from multi-sample
+  path tangents rather than per-frame box angles, which are exactly the
+  thing that is noisy; and the angle is folded into [0°, 90°], so an
+  oncoming vehicle reads as road-parallel rather than maximally turned away.
+
+Departures are reported as `road_departure` (severity `low`, `fixable:
+false`) with the evidence in the description — how far past the edge it got
+and how far it turned — so a reviewer can judge the call rather than take it
+on trust. Everything else stays `off_road` and is clamped, and even then the
+clamp gives up past 1.5 m: a correction that large is evidence the corridor
+geometry is what's wrong, not the vehicle.
 
 ### Why vehicle heading can look "botched"
 

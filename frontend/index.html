@@ -8,7 +8,7 @@
        broken against a cached copy -- a browser holding the previous
        style.css rendered the topbar logo below at its natural size
        (a full-page-wide image) because the rule sizing it was missing. -->
-  <link rel="stylesheet" href="style.css?v=2" />
+  <link rel="stylesheet" href="style.css?v=3" />
 </head>
 <body>
   <header class="topbar">
@@ -144,7 +144,12 @@
             <button id="zoom-out" title="Zoom out">&minus;</button>
             <button id="recenter" title="Recenter on ego">&#8853;</button>
             <label class="checkbox-field"><input id="heading-up" type="checkbox" checked /> Lock heading up</label>
-            <label class="checkbox-field"><input id="show-lanes" type="checkbox" checked /> Lanes</label>
+            <label class="checkbox-field" title="The annotated lane markings (the painted lines between lanes).">
+              <input id="show-lanes" type="checkbox" checked /> Lanes
+            </label>
+            <label class="checkbox-field" title="The annotated Road Edge / Guardrail polylines: the outer limit of the drivable corridor. Drawn with tick marks on their off-road side. This is the boundary every &quot;off road&quot; issue is measured against — and it only maps the ego's own road, so a vehicle turning off onto a side road is outside it legitimately.">
+              <input id="show-road-edges" type="checkbox" checked /> Road edges
+            </label>
             <label class="checkbox-field"><input id="show-static" type="checkbox" /> Static objects</label>
             <label class="checkbox-field" title="Overlay each vehicle where the annotation originally recorded it, before Apply fixes moved it or an alternative scenario perturbed it. Drawn as a dashed grey outline with a dashed trail. Nothing to show on an untouched trace.">
               <input id="show-original" type="checkbox" /> Original (pre-fix)
@@ -160,6 +165,12 @@
             <span><i class="swatch predicted"></i>Predicted</span>
             <span><i class="swatch flagged"></i>Flagged</span>
             <span id="legend-original" class="hidden"><i class="swatch original"></i>Original</span>
+            <span title="Annotated lane marking — the painted line between two lanes.">
+              <i class="swatch lane"></i>Lane marking
+            </span>
+            <span title="Annotated Road Edge / Guardrail: the outer limit of the drivable corridor. The ticks point off-road. Every &quot;off road&quot; issue is measured against this line, and it only covers the ego's own road.">
+              <i class="swatch road-edge"></i>Road edge
+            </span>
           </div>
         </div>
         <button id="gps-readout" class="gps-readout" title="Click to copy ego GPS coordinates">
@@ -188,6 +199,15 @@
         </div>
         <label class="checkbox-field" title="A predicted vehicle brakes (down to a full stop, never swerves) rather than driving straight through the ego or another vehicle's box. A conflict closing faster than realistic braking allows can still show up as a collision issue -- that's the honest outcome, not something this papers over.">
           <input id="predict-avoid-collisions" type="checkbox" checked /> Avoid predicted collisions
+        </label>
+        <label class="text-field" title="How hard to smooth a noisy track. Smoothing only ever touches the stretches validation flagged as kinematically implausible — a vehicle that simply isn't travelling in a perfectly straight line is left exactly as recorded — and can never move an observation more than a meter. Turn it off to apply only the road-edge clamp and the trailing-overlap trim.">
+          Smoothing
+          <select id="fix-smoothing">
+            <option value="off">Off (clamp/trim only)</option>
+            <option value="light">Light</option>
+            <option value="standard" selected>Standard</option>
+            <option value="strong">Strong</option>
+          </select>
         </label>
         <div class="button-row">
           <button id="btn-fix" class="primary">Apply fixes</button>

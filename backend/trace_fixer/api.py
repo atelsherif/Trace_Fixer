@@ -36,7 +36,7 @@ from trace_fixer.prediction.extrapolate import clear_predictions, find_track_con
 from trace_fixer.scene import build_scene_json
 from trace_fixer.store import TraceStore
 from trace_fixer.validation.checks import run_validation
-from trace_fixer.validation.fixes import apply_fixes
+from trace_fixer.validation.fixes import DEFAULT_SMOOTHING, apply_fixes
 from trace_fixer.variants import Variant, generate_preset_variants, generate_randomized_variants
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -221,12 +221,24 @@ def validate(trace_id: str):
     return {"issue_count": len(issues), "scene": build_scene_json(trace)}
 
 
+class FixRequest(BaseModel):
+    # "off" | "light" | "standard" | "strong" -- see validation.fixes.
+    # Smoothing is applied only to the stretches validation flagged as
+    # kinematically implausible, so "standard" no longer means "reshape every
+    # track"; "off" skips it entirely and leaves the corridor clamp and the
+    # trailing-overlap trim as the only edits.
+    smoothing: str = DEFAULT_SMOOTHING
+
+
 @app.post("/api/traces/{trace_id}/fix")
-def fix(trace_id: str):
+def fix(trace_id: str, req: FixRequest = FixRequest()):
     trace = _get_trace_or_404(trace_id)
     if not trace.issues:
         run_validation(trace)
-    summary = apply_fixes(trace)
+    try:
+        summary = apply_fixes(trace, smoothing=req.smoothing)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return {"summary": summary, "scene": build_scene_json(trace)}
 
 
@@ -268,6 +280,8 @@ class FixExportOptions(PredictRequest):
 
     include_predictions_in_output: bool = True
     fix_issues: bool = True
+    # See FixRequest.smoothing.
+    smoothing: str = DEFAULT_SMOOTHING
     predict_trajectories: bool = True
     export_fixed_trace: bool = True
     export_opendrive: bool = True
@@ -340,7 +354,7 @@ def _fix_predict_and_write_output(trace_id: str, opts: FixExportOptions) -> dict
     """
     trace = store.get(trace_id)
     before = run_validation(trace)
-    fix_summary = apply_fixes(trace) if opts.fix_issues else {}
+    fix_summary = apply_fixes(trace, smoothing=opts.smoothing) if opts.fix_issues else {}
     added = (
         predict_all(
             trace, horizon_s=opts.horizon_s, step_s=opts.step_s, backward=opts.backward, forward=opts.forward,

@@ -174,6 +174,16 @@ def build_scene_json(trace: Trace, max_ego_points: int = 1500) -> dict:
         ]
         vehicles.append({"id": track.obj_id, "obj_type": track.obj_type, "observations": obs_list})
 
+    def _side_of_ego(snap) -> str | None:
+        """"left" / "right" of the ego, from the mean ego-relative y of the
+        polyline. The GUI uses it to hatch a road edge on its off-road side,
+        which is the difference between a line you have to guess at and one
+        that says which side of it is road."""
+        if not snap.points_rel:
+            return None
+        mean_y = sum(p[1] for p in snap.points_rel) / len(snap.points_rel)
+        return "left" if mean_y > 0 else "right"
+
     def _build_lines(lines_dict) -> list:
         out = []
         for line in lines_dict.values():
@@ -182,6 +192,7 @@ def build_scene_json(trace: Trace, max_ego_points: int = 1500) -> dict:
                     "t_s": (snap.t_us + trace.sync_offset_us - t0) / 1e6,
                     "frame": snap.frame,
                     "points": snap.points_m,
+                    "side": _side_of_ego(snap),
                 }
                 for snap in line.snapshots
             ]

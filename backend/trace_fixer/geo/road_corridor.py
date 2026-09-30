@@ -5,9 +5,19 @@ off-road clamp so the two agree on what "on-road" means.
 """
 from __future__ import annotations
 
-from trace_fixer.models import BorderLine
+from trace_fixer.models import BorderLine, VehicleObs
 
 CORRIDOR_X_TOL_M = 40.0
+
+# How far past an edge/guardrail a box may reach before it counts as outside
+# the corridor. Lives here rather than in validation.checks so the departure
+# classifier can use it without importing the validator.
+OFFROAD_MARGIN_M = 0.3
+
+# Below this, an "excursion" is a rounding artifact of where the margin falls
+# rather than something a reviewer could act on -- annotated box edges aren't
+# accurate to the centimeter. Treated as inside the corridor.
+MIN_EXCURSION_M = 0.05
 
 
 def corridor_bounds(
@@ -35,3 +45,25 @@ def corridor_bounds(
     left_bound = min(left_candidates) if left_candidates else None
     right_bound = max(right_candidates) if right_candidates else None
     return left_bound, right_bound
+
+
+def corridor_excursion(
+    border_lines: dict[int, BorderLine], obs: VehicleObs
+) -> tuple[float, str | None]:
+    """How far outside the corridor this observation's box reaches, and on
+    which side ("left"/"right").
+
+    Returns (0.0, None) when the box is inside the corridor (or within
+    MIN_EXCURSION_M of the edge), or when there is no border geometry near it
+    to judge against. This *is* the off-road test, factored out so the fix
+    engine and the departure classifier can ask "how far out?" and not just
+    "out or not?".
+    """
+    left, right = corridor_bounds(border_lines, obs.t_us, obs.x_rel)
+    half_w = obs.width / 2.0
+    out, side = 0.0, None
+    if left is not None and obs.y_rel - half_w > left - OFFROAD_MARGIN_M:
+        out, side = (obs.y_rel - half_w) - (left - OFFROAD_MARGIN_M), "left"
+    elif right is not None and obs.y_rel + half_w < right + OFFROAD_MARGIN_M:
+        out, side = (right + OFFROAD_MARGIN_M) - (obs.y_rel + half_w), "right"
+    return (out, side) if out >= MIN_EXCURSION_M else (0.0, None)

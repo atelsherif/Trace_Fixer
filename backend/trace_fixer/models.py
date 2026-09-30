@@ -172,7 +172,7 @@ class Annotation:
 @dataclass
 class Issue:
     issue_id: str
-    category: str  # "kinematic" | "collision" | "off_road" | "sync"
+    category: str  # "kinematic" | "collision" | "off_road" | "road_departure" | "sync"
     severity: str  # "low" | "medium" | "high"
     vehicle_id: int | None
     t_start_us: int

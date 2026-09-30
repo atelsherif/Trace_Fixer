@@ -70,7 +70,7 @@ KNOWN_PHENOMENA = [
     "standstill",
     "sharp_turn",
 ]
-KNOWN_ISSUE_CATEGORIES = ["kinematic", "collision", "off_road", "sync"]
+KNOWN_ISSUE_CATEGORIES = ["kinematic", "collision", "off_road", "road_departure", "sync"]
 
 
 def connect(db_path: Path) -> sqlite3.Connection:

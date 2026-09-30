@@ -6,10 +6,16 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SAMPLE_DIR = REPO_ROOT / "data" / "traces" / "sample1"
+SAMPLE2_DIR = REPO_ROOT / "data" / "traces" / "sample2"
 
 
 @pytest.fixture()
 def fixed_trace():
+    """sample1 put through the fix engine. Used for the output *layout* tests,
+    which assert sample1's own filenames -- note that the engine finds nothing
+    to change here (sample1 is issue-free), so this trace's provenance is
+    still "original"; see `repaired_trace` for the provenance tests.
+    """
     from trace_fixer.scene import load_trace
     from trace_fixer.validation.checks import run_validation
     from trace_fixer.validation.fixes import apply_fixes
@@ -17,6 +23,24 @@ def fixed_trace():
     trace = load_trace("sample1", SAMPLE_DIR / "adma.csv", SAMPLE_DIR / "annotation.xml")
     run_validation(trace)
     apply_fixes(trace)
+    return trace
+
+
+@pytest.fixture()
+def repaired_trace():
+    """A trace the fix engine actually changed. It has to be sample2: the
+    engine only edits what validation flagged (see validation.fixes), and
+    sample1 has nothing to flag, so fixing it is legitimately a no-op and its
+    exports rightly carry no "fixed" suffix.
+    """
+    from trace_fixer.scene import load_trace
+    from trace_fixer.validation.checks import run_validation
+    from trace_fixer.validation.fixes import apply_fixes
+
+    trace = load_trace("sample2", SAMPLE2_DIR / "adma.csv", SAMPLE2_DIR / "annotation.xml")
+    run_validation(trace)
+    apply_fixes(trace)
+    assert any(o.fixed for t in trace.annotation.vehicles.values() for o in t.observations)
     return trace
 
 
@@ -46,7 +70,7 @@ def test_output_preserves_original_filename_for_scanned_traces(fixed_trace, tmp_
     assert Path(paths["annotation_path"]).name == "LB-VS-271_20200722_split_038_MERGED__ref-QC_IND.xml"
 
 
-def test_a_fixed_trace_does_not_overwrite_the_original_export(fixed_trace, tmp_path):
+def test_a_fixed_trace_does_not_overwrite_the_original_export(repaired_trace, tmp_path):
     """The whole point of the provenance suffix: exporting a trace and then
     exporting it again after Apply fixes must leave two distinguishable
     files, not one."""
@@ -54,31 +78,43 @@ def test_a_fixed_trace_does_not_overwrite_the_original_export(fixed_trace, tmp_p
     from trace_fixer.scene import load_trace
 
     output_root = tmp_path / "output"
-    original = load_trace("sample1", SAMPLE_DIR / "adma.csv", SAMPLE_DIR / "annotation.xml")
+    original = load_trace("sample2", SAMPLE2_DIR / "adma.csv", SAMPLE2_DIR / "annotation.xml")
 
-    before = write_batch_output(original, SAMPLE_DIR / "annotation.xml", output_root)
-    after = write_batch_output(fixed_trace, SAMPLE_DIR / "annotation.xml", output_root)
+    before = write_batch_output(original, SAMPLE2_DIR / "annotation.xml", output_root)
+    after = write_batch_output(repaired_trace, SAMPLE2_DIR / "annotation.xml", output_root)
 
     assert Path(before["adma_path"]).name == "adma.csv"
     assert Path(after["adma_path"]).name == "adma__fixed.csv"
     assert Path(before["annotation_path"]).exists() and Path(after["annotation_path"]).exists()
 
 
-def test_provenance_suffix_names_the_state_the_export_came_from(fixed_trace):
+def test_provenance_suffix_names_the_state_the_export_came_from(repaired_trace):
     from trace_fixer.export.batch_output import provenance_suffix
     from trace_fixer.prediction.extrapolate import predict_all
     from trace_fixer.scene import load_trace
 
-    original = load_trace("sample1", SAMPLE_DIR / "adma.csv", SAMPLE_DIR / "annotation.xml")
+    original = load_trace("sample2", SAMPLE2_DIR / "adma.csv", SAMPLE2_DIR / "annotation.xml")
     assert provenance_suffix(original) == ""
-    assert provenance_suffix(fixed_trace) == "fixed"
-    assert provenance_suffix(fixed_trace, pov_vehicle_id=7) == "fixed__pov7"
+    assert provenance_suffix(repaired_trace) == "fixed"
+    assert provenance_suffix(repaired_trace, pov_vehicle_id=7) == "fixed__pov7"
     # A variant's identity is already in its trace_id, so the perturbation's
     # own `fixed` flags aren't repeated in the filename.
-    assert provenance_suffix(fixed_trace, is_variant=True) == ""
+    assert provenance_suffix(repaired_trace, is_variant=True) == ""
 
     predict_all(original, horizon_s=2.0, step_s=0.1, backward=True, forward=False)
     assert provenance_suffix(original) == "predicted"
+
+
+def test_fixing_an_issue_free_trace_is_a_no_op_and_says_so(fixed_trace):
+    """Apply fixes on a clean trace must not claim to have fixed anything.
+    Smoothing used to reshape every track unconditionally, so even sample1 --
+    which validation finds nothing wrong with -- came back stamped "fixed".
+    """
+    from trace_fixer.export.batch_output import provenance_suffix
+
+    assert fixed_trace.issues == []
+    assert provenance_suffix(fixed_trace) == ""
+    assert not any(o.fixed for t in fixed_trace.annotation.vehicles.values() for o in t.observations)
 
 
 def test_record_export_appends_one_line_per_export(tmp_path):
