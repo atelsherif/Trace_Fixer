@@ -14,7 +14,7 @@
        failing on a blocked script. -->
   <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
   <script src="vendor/leaflet/leaflet.js"></script>
-  <link rel="stylesheet" href="style.css?v=5" />
+  <link rel="stylesheet" href="style.css?v=6" />
 </head>
 <body>
   <header class="topbar">
@@ -172,7 +172,9 @@
             <span><i class="swatch ego"></i>Ego</span>
             <span><i class="swatch vehicle"></i>Vehicle</span>
             <span><i class="swatch predicted"></i>Predicted</span>
-            <span><i class="swatch flagged"></i>Flagged</span>
+            <span title="A high-severity issue — boxes overlapping, or a jump no vehicle could make."><i class="swatch sev-high"></i>Problem</span>
+            <span title="A medium-severity issue — implausible but not impossible, worth a look."><i class="swatch sev-medium"></i>Check</span>
+            <span title="Informational — most often a vehicle that left the mapped road and was deliberately left as recorded. Not an error."><i class="swatch sev-low"></i>Note</span>
             <span id="legend-original" class="hidden"><i class="swatch original"></i>Original</span>
             <span title="Annotated lane marking — the painted line between two lanes.">
               <i class="swatch lane"></i>Lane marking
@@ -206,9 +208,6 @@
             <input id="predict-horizon-m" type="number" min="0" step="10" placeholder="none" />
           </label>
         </div>
-        <label class="checkbox-field" title="A predicted vehicle brakes (down to a full stop, never swerves) rather than driving straight through the ego or another vehicle's box. A conflict closing faster than realistic braking allows can still show up as a collision issue -- that's the honest outcome, not something this papers over.">
-          <input id="predict-avoid-collisions" type="checkbox" checked /> Avoid predicted collisions
-        </label>
         <label class="text-field" title="How hard to smooth a noisy track. Smoothing only ever touches the stretches validation flagged as kinematically implausible — a vehicle that simply isn't travelling in a perfectly straight line is left exactly as recorded — and can never move an observation more than a meter. Turn it off to apply only the road-edge clamp and the trailing-overlap trim.">
           Smoothing
           <select id="fix-smoothing">
@@ -221,11 +220,6 @@
         <div class="button-row">
           <button id="btn-fix" class="primary">Apply fixes</button>
           <button id="btn-reset">Reset trace</button>
-        </div>
-        <div class="field sync-field">
-          Sync offset (ms)
-          <input id="sync-offset" type="range" min="-2000" max="2000" step="10" value="0" />
-          <span id="sync-offset-value">0</span>
         </div>
         <p id="status-line" class="status-line"></p>
       </div>
@@ -241,31 +235,23 @@
           <span class="export-target-label">Exporting</span>
           <span id="export-target-value" class="export-target-value">original trace</span>
         </div>
-        <div class="button-row">
-          <button id="export-fixed-trace" title="Writes both the corrected ADMA CSV and annotation XML into their respective output/ directories in one action.">Fixed Trace (ADMA+Annotation)</button>
+        <div class="export-grid">
+          <button id="export-fixed-trace" title="Writes both the corrected ADMA CSV and annotation XML into their respective output/ directories in one action.">ADMA+Ann.</button>
+          <button id="export-scenario" title="Writes the OpenDRIVE road network and the OpenSCENARIO file together — the .xosc names the .xodr this same click wrote, so the pair always matches. The road is enriched from OpenStreetMap when the network allows; if it doesn't, the offline road is written instead and the message says so.">OpenDRIVE+SCENARIO</button>
+          <button id="export-adp-yaml" title="Alternative to OpenSCENARIO for ADP, which doesn't read .xosc. See README's 'ADP YAML export' section for what's a real conversion vs. a best-effort guess.">ADP (.scn.yaml)</button>
+          <button id="export-report" title="Writes the trace summary as both .txt and .xml in one action.">Report (.txt+.xml)</button>
         </div>
-        <div class="button-row">
-          <button id="export-opendrive">OpenDRIVE</button>
-        </div>
-        <label class="checkbox-field" title="Look up the trace's road on OpenStreetMap first (road name, and a lane-count hint used only where the annotation itself has no trustworthy estimate). Requires internet access; falls back silently to the offline result on failure.">
-          <input id="export-enrich-osm" type="checkbox" /> Enrich with OpenStreetMap (online)
-        </label>
-        <div class="button-row">
-          <button id="export-openscenario">OpenSCENARIO</button>
-          <button id="export-adp-yaml" title="Alternative to OpenSCENARIO for ADP, which doesn't read .xosc. See README's 'ADP YAML export' section for what's a real conversion vs. a best-effort guess.">ADP scenario (.scn.yaml)</button>
-        </div>
-        <label class="text-field" title="ADP's own map registry key for this trace. Defaults to the trace_id, matching the OpenDRIVE export's <trace_id>.xodr filename -- override if you imported that file under a different name.">
-          Map key
-          <input id="adp-map-key" type="text" placeholder="(defaults to trace_id)" />
-        </label>
-        <label class="text-field" title="Re-root the OpenSCENARIO/ADP scenario export from a chosen vehicle's point of view instead of the ego: that vehicle becomes 'Ego' in the file, the real ego becomes a regular vehicle, and the export is truncated to that vehicle's own observed time window. Doesn't affect OpenDRIVE or Fixed Trace.">
-          POV
-          <select id="pov-vehicle-select"><option value="">Ego (normal)</option></select>
-        </label>
-        <div class="button-row">
-          <button id="export-report-txt">Trace summary (.txt)</button>
-          <button id="export-report-xml">Trace summary (.xml)</button>
-        </div>
+        <details class="export-options">
+          <summary>Options</summary>
+          <label class="text-field" title="ADP's own map registry key for this trace. Defaults to the trace_id, matching the OpenDRIVE export's &lt;trace_id&gt;.xodr filename — override if you imported that file under a different name.">
+            Map key
+            <input id="adp-map-key" type="text" placeholder="(defaults to trace_id)" />
+          </label>
+          <label class="text-field" title="Re-root the OpenSCENARIO/ADP scenario export from a chosen vehicle's point of view instead of the ego: that vehicle becomes 'Ego' in the file, the real ego becomes a regular vehicle, and the export is truncated to that vehicle's own observed time window. Doesn't affect OpenDRIVE or ADMA+Ann.">
+            POV
+            <select id="pov-vehicle-select"><option value="">Ego (normal)</option></select>
+          </label>
+        </details>
 
         <details id="export-log-block" class="export-log-block">
           <summary>Recent exports <span id="export-log-count" class="badge badge-quiet">0</span></summary>

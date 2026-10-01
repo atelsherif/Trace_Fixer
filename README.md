@@ -26,11 +26,24 @@ PYTHONPATH=backend python3 -m trace_fixer.main   # serves on http://localhost:80
 (The Python package is still named `trace_fixer` internally — only the
 displayed product name changed, first to PreTwin and now to PreTwinner.)
 
-Open `http://localhost:8000` in a browser. Two sample traces are bundled
-and load automatically: `sample1` and `sample2` (`data/traces/sample1/`,
-`sample2/`) — see *Why vehicle heading can look "botched"* below for why
-they're both worth keeping around even though their annotation exports
-turned out to use the same `zrot` convention. Add more traces either by:
+Open `http://localhost:8000` in a browser. Eight traces are bundled under
+`data/traces/`, all suffixed `_baseline_<n>` so they sort together and are
+obviously the fixed reference set rather than something scanned in:
+
+| trace | what it's for |
+|---|---|
+| `sample1_baseline_1` | Clean steady-state highway. Validation finds nothing — the control case |
+| `sample2_baseline_2` | Kinematic noise and duplicate timestamps; every vehicle lane-labelled |
+| `..._split_057_MERGED_baseline_4` | **6 issues → 0.** The cleanest fix demo |
+| `..._split_046_MERGED_baseline_3` | Best "Original (pre-fix)" overlay: 6 s of 1.3 m separation |
+| `..._split_064_MERGED_baseline_5` | Heaviest kinematic load (25 → 3), plus real road departures |
+| `..._split_068_MERGED_baseline_6` | The only one carrying all three issue categories — the off-road fixture |
+| `..._split_053_MERGED_baseline_7` | Five track continuations, the most in the corpus |
+| `..._split_065_MERGED_baseline_8` | Highest raw issue count; stress case |
+
+`sample1` and `sample2` are kept despite the newer traces — see *Why
+vehicle heading can look "botched"* below for why. The six `split_*` traces
+are real motorway recordings. Add more traces either by:
 
 - **Upload trace…** in the top bar — for one-off pairs; each upload gets its
   own `data/traces/<id>/` directory (copied onto the server).
@@ -186,8 +199,9 @@ from a single frame without scrubbing.
      acquisition is measured short and re-measured at full length later
      (14.0m then 21.6m for the same truck), which is exactly the case
      this exists to catch.
-   - **A following-distance governor** (**Avoid predicted collisions**,
-     on by default). Each step checks whether the vehicle's box at the
+   - **A following-distance governor**, always on. It was a checkbox; there
+     is no reason to want a prediction that drives through other traffic,
+     and the governor costs nothing when there is no conflict to govern. Each step checks whether the vehicle's box at the
      resulting position would overlap the ego or another vehicle at that
      same instant, and brakes rather than accepting the overlap. Braking
      and recovery are rate-limited (5.0 / 2.0 m/s², both under
@@ -203,7 +217,7 @@ from a single frame without scrubbing.
      load-bearing — see *Why a governed prediction could still collide*
      below.
 
-   **Avoid predicted collisions** (checked by default) makes a predicted
+   The governor makes a predicted
    vehicle brake — down to a full stop if needed, never swerve — rather
    than driving straight through the ego or another vehicle's box; see
    `REAR_HORIZON_MULTIPLIER`'s neighboring constants in
@@ -253,26 +267,34 @@ from a single frame without scrubbing.
    dragged back into the ego's lane (see *Off-road vs. road departure*).
    Fixing an already-clean trace is a genuine no-op — no edits, no `__fixed`
    suffix on its exports.
-9. **Sync offset** nudges the annotation clock against the ADMA clock (see
-   *Time alignment* below) — drag while watching the replay.
-10. **Export**, one artifact type per button: **Fixed Trace
-    (ADMA+Annotation)** writes both the corrected ADMA CSV and annotation XML
-    in one action; **OpenDRIVE** (with the **Enrich with OpenStreetMap
-    (online)** checkbox next to it — optional, off by default, see *Online
-    map enrichment* below for what it does and doesn't affect); **OpenSCENARIO**
-    and **ADP scenario (.scn.yaml)** (for ADP, which doesn't read `.xosc` —
-    see *ADP YAML export* below, including the optional **Map key** field
-    above the two, and the **POV** selector next to it — see *Vehicle
-    point-of-view export* below); and a **trace summary** as `.txt` or
-    `.xml` — see *Trace summary report* below. Every export writes into
-    `output/` and never triggers a browser download — see *Output
-    directory* below.
-11. **Map (OSM)** (viewport controls, top-left of the canvas) opens a real
+9. **Export** is four buttons, each writing one complete, self-consistent
+   set of artifacts:
+
+   - **ADMA+Ann.** — the corrected ADMA CSV and annotation XML.
+   - **OpenDRIVE+SCENARIO** — the road network and the scenario that drives
+     on it, together. These used to be separate, which made it possible to
+     export a `.xosc` naming a `.xodr` nobody had written, or one written
+     from an earlier state of the trace. They are a matched pair by
+     construction, so they ship as one click. OpenStreetMap enrichment is
+     **on by default** and needs no checkbox: a failed lookup has never been
+     able to fail an export, it falls back to the offline road, and the
+     status line says so.
+   - **ADP (.scn.yaml)** — for ADP, which doesn't read `.xosc`; see *ADP
+     YAML export* below.
+   - **Report (.txt+.xml)** — the trace summary in both formats. One is for
+     a human and one is for a tool; they are the same content, and wanting
+     one rarely means not wanting the other.
+
+   **Map key** and **POV** live under **Options**, folded away — they are
+   the two settings almost nobody changes. Every export writes into
+   `output/` and never triggers a browser download — see *Output directory*
+   below.
+10. **Map (OSM)** (viewport controls, top-left of the canvas) opens a real
     OpenStreetMap view of *where this trace was driven*, in a floating
     panel. **OSM roads**, next to it, is the other thing — it pulls road
     centerlines into the viewport's own coordinate frame for geometry
     comparison. See *Seeing where a trace was driven* below.
-12. **Alternative Scenarios** (below Export) generates a menu of harder/
+11. **Alternative Scenarios** (below Export) generates a menu of harder/
     different scenarios from the current trace by perturbing one
     surrounding vehicle's trajectory at a time, previewable and separately
     exportable — see *Alternative scenarios (ODD variants)* below.
@@ -708,7 +730,8 @@ displacement over time:
 Both files carry a "chunktime" field, which in a clean recording session is
 the same ADTF pipeline clock and can be used directly with zero offset —
 that's the default. In practice the two loggers can start slightly apart or
-drift, so the GUI exposes an adjustable `sync_offset_us`, applied to the
+drift, so the API exposes an adjustable `sync_offset_us` (`POST
+/api/traces/{id}/sync_offset`), applied to the
 annotation clock before it's used to sample the ego trace. There's no
 ground truth in a single trace to fit an automatic offset against, so this
 is a manual nudge-while-watching-the-replay control rather than an
@@ -728,6 +751,26 @@ and explainable rules are what an annotation QA team can act on directly.
 | Road departure | Vehicle *leaves* the ego's road — an exit ramp, a turn into a side street | No — reported for review and left exactly as recorded (see below) |
 | Collision (vehicle↔ego) | Bounding boxes overlap | Trailing overlaps (track ends inside the ego box — a common "lost track as it merged" artifact) are trimmed. Mid-track overlaps are flagged only |
 | Collision (vehicle↔vehicle) | Bounding boxes overlap | Flagged only (no auto-fix — resolving which of two vehicles is "wrong" isn't well-defined without more context, including between two independently-predicted pre-FOV segments) |
+
+### Flagged vehicles are coloured by severity
+
+A vehicle with any active issue used to be painted the same red. That made
+a `road_departure` — informational, deliberately not corrected — look
+exactly like a bounding box overlapping the ego at 120 km/h, which invites
+a reviewer to go hunting for a defect that isn't there.
+
+The viewport now colours each vehicle by the *worst* severity against it at
+that instant, and the legend names the three bands rather than saying
+"flagged":
+
+| band | severity | means |
+|---|---|---|
+| **Problem** (red) | high | Boxes overlapping, or a jump no vehicle could make |
+| **Check** (amber) | medium | Implausible but not impossible; worth a look |
+| **Note** (blue) | low | Informational — most often a vehicle that left the mapped road and was left as recorded |
+
+Only `high` keeps the attention-grabbing halo. The issue list already
+colour-coded its left border this way; the canvas now agrees with it.
 
 ### Why a governed prediction could still collide
 
@@ -776,6 +819,47 @@ prediction still adds ~10 kinematic flags on `sample2` at the seam between
 a track's last real observation and its first predicted one, governed or
 not. That's the constant-speed extrapolation meeting a decelerating
 vehicle, not the governor.
+
+### The annotation's lane label outranks the corridor
+
+The Road Edge / Guardrail polylines do not necessarily span the whole
+carriageway, and on a divided motorway they frequently don't. In
+`split_046`, ten vehicles labelled `2nd Left` sit 2.5–10.5 m beyond the
+annotated left edge for their entire tracks — three of them never inside it
+for a single frame — while travelling within a few degrees of the ego's own
+course. They are not leaving the road. The corridor simply stops before
+their lane.
+
+So the off-road test defers to `obj_lane`. If the annotation placed a
+vehicle in a numbered lane (`EGO lane`, `1st Left`, `2nd Left`, `1st
+Right`, `2nd Right`), it is on the road, whatever the polylines say — that
+is a human annotator's judgement about the thing being annotated, and it
+beats geometry inferred from an incomplete corridor. `Other` is the
+annotation's own value for a vehicle in no numbered lane, so it stays
+eligible; it is the label a genuine departure carries.
+
+The effect across the 25-trace corpus:
+
+| | before | after |
+|---|---|---|
+| `off_road` | 32 | 3 |
+| `road_departure` | 61 | 20 |
+
+Every one of the 23 that survive is `Other`-labelled. The 70 that went away
+were the corridor's coverage being reported as the data's problem — and
+worse, the off-road clamp had been trying to nudge traffic two lanes over
+toward the ego. The clamp honours the same test now, so the validator and
+the fix engine can no longer disagree about whether a vehicle is on the
+road.
+
+One consequence worth stating plainly: **the corridor clamp does not fire
+anywhere in the 25-trace corpus.** Every candidate is either lane-labelled
+(skipped) or more than `MAX_CLAMP_M` outside (declined as unjustifiable).
+Both are the right call, but it means "off-road is auto-fixed" is no longer
+true in practice on this data — the surviving `off_road` flags are for a
+human. The clamp is kept, and unit-tested against a synthetic trace,
+because a corpus with sub-metre annotation noise outside the lanes would
+exercise it.
 
 ### Off-road vs. road departure
 

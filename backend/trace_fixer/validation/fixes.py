@@ -30,7 +30,12 @@ import math
 
 import numpy as np
 
-from trace_fixer.geo.road_corridor import MIN_EXCURSION_M, OFFROAD_MARGIN_M, corridor_bounds
+from trace_fixer.geo.road_corridor import (
+    MIN_EXCURSION_M,
+    OFFROAD_MARGIN_M,
+    ON_ROAD_LANE_LABELS,
+    corridor_bounds,
+)
 from trace_fixer.geo.road_departure import DEPARTURE, classify_offroad
 from trace_fixer.geo.sync import apply_offset
 from trace_fixer.geo.transform import (
@@ -240,6 +245,14 @@ def _clamp_offroad(track: VehicleTrack, trace: Trace, interp: EgoInterpolator) -
         poses.append((ex, ey, eyaw))
         if labels.get(o.t_us) == DEPARTURE:
             departures += 1
+            corrections.append(0.0)
+            continue
+        # The annotation put this vehicle in a lane, so the corridor's
+        # opinion of it doesn't apply -- same test the validator makes (see
+        # geo.road_corridor). Without this the clamp went on nudging traffic
+        # in the outer lanes toward the ego while the validator, correctly,
+        # reported nothing wrong with them.
+        if o.obj_lane in ON_ROAD_LANE_LABELS:
             corrections.append(0.0)
             continue
         left, right = corridor_bounds(

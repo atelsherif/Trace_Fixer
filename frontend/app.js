@@ -51,6 +51,11 @@ const COLORS = {
   predictedFill: "#b98cf233",
   flagged: "#ff5f6d",
   flaggedFill: "#ff5f6d55",
+  // Flagged vehicles are coloured by the *worst* severity against them, so
+  // a low-severity note doesn't read like a collision. Keep in sync with
+  // --high / --medium / --low in style.css, which the legend swatches use.
+  severity: { high: "#ff5f6d", medium: "#ffb84d", low: "#7fd4ff" },
+  severityFill: { high: "#ff5f6d55", medium: "#ffb84d44", low: "#7fd4ff33" },
   lane: "#4a5568",
   roadEdge: "#c98a3c",
   original: "#9aa5b8",
@@ -475,15 +480,28 @@ function resizeCanvas() {
   c.style.height = rect.height + "px";
 }
 
+const SEVERITY_RANK = { low: 1, medium: 2, high: 3 };
+
+/** The worst severity flagged against each vehicle at time t, not merely
+ * "is something flagged".
+ *
+ * Painting every flagged vehicle the same red made a low-severity note read
+ * exactly like a box overlapping the ego at 120 km/h. A `road_departure` in
+ * particular is informational -- it says "this vehicle left the mapped road
+ * and was deliberately not corrected" -- and turning it blood-red invites a
+ * reviewer to go hunting for a defect that isn't there. */
 function activeIssuesAt(t) {
-  if (!state.scene) return new Set();
-  const ids = new Set();
+  if (!state.scene) return new Map();
+  const worst = new Map();
   for (const issue of state.scene.issues) {
-    if (issue.vehicle_id != null && t >= issue.t_start_s - 0.3 && t <= issue.t_end_s + 0.3) {
-      ids.add(issue.vehicle_id);
+    if (issue.vehicle_id == null) continue;
+    if (t < issue.t_start_s - 0.3 || t > issue.t_end_s + 0.3) continue;
+    const rank = SEVERITY_RANK[issue.severity] || 1;
+    if (rank > (SEVERITY_RANK[worst.get(issue.vehicle_id)] || 0)) {
+      worst.set(issue.vehicle_id, issue.severity);
     }
   }
-  return ids;
+  return worst;
 }
 
 function draw() {
@@ -542,16 +560,27 @@ function draw() {
   for (const vehicle of state.scene.vehicles) {
     const v = vehicleAt(vehicle, state.timeS);
     if (!v) continue;
-    const isFlagged = flagged.has(vehicle.id);
+    const severity = flagged.get(vehicle.id);
     const isSelected = state.selectedVehicleId === vehicle.id;
-    const color = v.synthetic ? COLORS.predicted : isFlagged ? COLORS.flagged : COLORS.vehicle;
+    const color = v.synthetic
+      ? COLORS.predicted
+      : severity
+      ? COLORS.severity[severity]
+      : COLORS.vehicle;
+    const fill = v.synthetic
+      ? COLORS.predictedFill
+      : severity
+      ? COLORS.severityFill[severity]
+      : COLORS.vehicleFill;
     drawTrail(ctx, vehicle.observations, state.timeS, color, lineWidthWorld);
     drawBox(ctx, v.x, v.y, v.heading_deg, v.length, v.width, {
-      fill: v.synthetic ? COLORS.predictedFill : isFlagged ? COLORS.flaggedFill : COLORS.vehicleFill,
+      fill,
       stroke: color,
       dashed: v.synthetic,
       lineWidth: (isSelected ? 3 : 1.5) * lineWidthWorld,
-      glow: isFlagged || isSelected ? 14 : 6,
+      // Only a genuine problem gets the attention-grabbing halo; a low
+      // severity note is coloured, not shouted.
+      glow: severity === "high" || isSelected ? 14 : 6,
     });
     if (isSelected) {
       ctx.save();
@@ -942,7 +971,13 @@ function renderIssueList() {
     meta.className = "issue-meta";
     meta.textContent = `${issue.category} · ${issue.severity}${issue.vehicle_id != null ? " · veh " + issue.vehicle_id : " · ego"}`;
     const desc = document.createElement("div");
+    desc.className = "issue-desc";
     desc.textContent = `${issue.description} (t=${issue.t_start_s.toFixed(1)}s)`;
+    // Clamped to a few lines in CSS so one long explanation can't fill the
+    // whole panel -- a road_departure description runs to two sentences,
+    // and three of them used to be the entire visible list. The full text
+    // is one hover away.
+    li.title = issue.description;
     li.appendChild(meta);
     li.appendChild(desc);
     li.addEventListener("click", () => {
@@ -1757,7 +1792,10 @@ function wireControls() {
       horizon_s: horizonSRaw ? parseFloat(horizonSRaw) : 4.0,
       step_s: 0.2,
       horizon_m: horizonMRaw ? parseFloat(horizonMRaw) : null,
-      avoid_collisions: el("predict-avoid-collisions").checked,
+      // Not a checkbox any more: there is no reason to want a prediction
+      // that drives through other traffic, and the governor costs nothing
+      // when there is no conflict to govern.
+      avoid_collisions: true,
     };
     const res = await apiPost(`/api/traces/${state.traceId}/predict`, body);
     applyScene(res.scene);
@@ -1806,29 +1844,16 @@ function wireControls() {
     setStatus("Trace reset to original files.");
   });
 
-  el("sync-offset").addEventListener("change", async (e) => {
-    const ms = parseFloat(e.target.value);
-    el("sync-offset-value").textContent = ms;
-    setStatus("Applying sync offset…");
-    const res = await apiPost(`/api/traces/${state.traceId}/sync_offset`, { offset_us: Math.round(ms * 1000) });
-    applyScene(res.scene);
-    setStatus(`Sync offset set to ${ms} ms.`);
-  });
-  el("sync-offset").addEventListener("input", (e) => {
-    el("sync-offset-value").textContent = e.target.value;
-  });
-
   el("export-fixed-trace").addEventListener("click", () =>
     runExport("fixed trace", `/api/traces/${state.traceId}/export/fixed_trace`)
   );
-  el("export-opendrive").addEventListener("click", () => {
-    const enrich = el("export-enrich-osm").checked ? "?enrich=osm" : "";
-    runExport("OpenDRIVE", `/api/traces/${state.traceId}/export/opendrive${enrich}`);
-  });
-  el("export-openscenario").addEventListener("click", () => {
+  el("export-scenario").addEventListener("click", () => {
+    // One call writes both: the .xosc names the .xodr the same call wrote,
+    // so the pair can never drift apart. OSM enrichment is on by default
+    // server-side and reports its own failure in the status line.
     const povId = el("pov-vehicle-select").value;
     const params = povId ? `?pov_vehicle_id=${encodeURIComponent(povId)}` : "";
-    runExport("OpenSCENARIO", `/api/traces/${state.traceId}/export/openscenario${params}`);
+    runExport("OpenDRIVE + OpenSCENARIO", `/api/traces/${state.traceId}/export/scenario${params}`);
   });
   el("export-adp-yaml").addEventListener("click", () => {
     const mapKey = el("adp-map-key").value.trim();
@@ -1839,11 +1864,8 @@ function wireControls() {
     const qs = params.toString();
     runExport("ADP scenario", `/api/traces/${state.traceId}/export/adp_yaml${qs ? `?${qs}` : ""}`);
   });
-  el("export-report-txt").addEventListener("click", () =>
-    runExport("trace summary", `/api/traces/${state.traceId}/export/report?format=txt`)
-  );
-  el("export-report-xml").addEventListener("click", () =>
-    runExport("trace summary", `/api/traces/${state.traceId}/export/report?format=xml`)
+  el("export-report").addEventListener("click", () =>
+    runExport("report", `/api/traces/${state.traceId}/export/report`)
   );
 
   el("variants-generate-preset").addEventListener("click", () => generateVariants("preset"));

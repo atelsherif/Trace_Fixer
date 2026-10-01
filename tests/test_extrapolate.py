@@ -365,7 +365,7 @@ def test_sample1_prediction_introduces_no_collisions_at_any_horizon():
     from trace_fixer.scene import load_trace
     from trace_fixer.validation.checks import run_validation
 
-    sample1 = Path(__file__).resolve().parents[1] / "data" / "traces" / "sample1"
+    sample1 = Path(__file__).resolve().parents[1] / "data" / "traces" / "sample1_baseline_1"
     for horizon_s in (4.0, 6.0, 10.0, 15.0):
         trace = load_trace("sample1", sample1 / "adma.csv", sample1 / "annotation.xml")
         assert run_validation(trace) == [], "sample1 is clean before prediction"
@@ -385,7 +385,7 @@ def test_the_governor_removes_collisions_without_adding_kinematic_issues():
     from trace_fixer.scene import load_trace
     from trace_fixer.validation.checks import run_validation
 
-    sample2 = Path(__file__).resolve().parents[1] / "data" / "traces" / "sample2"
+    sample2 = Path(__file__).resolve().parents[1] / "data" / "traces" / "sample2_baseline_2"
 
     def counts(avoid_collisions):
         trace = load_trace("sample2", sample2 / "adma.csv", sample2 / "annotation.xml")

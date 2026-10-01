@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SAMPLE2_DIR = REPO_ROOT / "data" / "traces" / "sample2"
+SAMPLE2_DIR = REPO_ROOT / "data" / "traces" / "sample2_baseline_2"
 
 
 def _ego(seconds: int = 60, speed: float = 20.0):
@@ -255,15 +255,15 @@ def test_a_batch_run_ignores_what_the_session_did_to_the_trace():
     api.OUTPUT_DIR.mkdir(parents=True)
     client = TestClient(api.app)
 
-    client.post("/api/traces/sample2/sync_offset", json={"offset_us": 500_000})
-    session_trace = api.store.get("sample2")
+    client.post("/api/traces/sample2_baseline_2/sync_offset", json={"offset_us": 500_000})
+    session_trace = api.store.get("sample2_baseline_2")
     assert session_trace.sync_offset_us == 500_000
 
-    r = client.post("/api/traces/sample2/batch_fix_predict")
+    r = client.post("/api/traces/sample2_baseline_2/batch_fix_predict")
     assert r.status_code == 200
 
     # the session's copy is exactly as the person left it...
-    assert api.store.get("sample2") is session_trace
+    assert api.store.get("sample2_baseline_2") is session_trace
     assert session_trace.sync_offset_us == 500_000
     assert not any(
         o.synthetic for t in session_trace.annotation.vehicles.values() for o in t.observations
@@ -283,8 +283,8 @@ def test_two_batch_runs_of_the_same_trace_agree():
     api.OUTPUT_DIR.mkdir(parents=True)
     client = TestClient(api.app)
 
-    first = client.post("/api/traces/sample2/batch_fix_predict").json()
-    second = client.post("/api/traces/sample2/batch_fix_predict").json()
+    first = client.post("/api/traces/sample2_baseline_2/batch_fix_predict").json()
+    second = client.post("/api/traces/sample2_baseline_2/batch_fix_predict").json()
     for key in ("before_issue_count", "after_issue_count", "provenance", "predicted"):
         assert first[key] == second[key], key
 
@@ -331,7 +331,7 @@ def test_the_corridor_is_reprojected_into_the_observations_ego_frame():
         ])
 
     obs = VehicleObs(
-        t_us=5_000_000, frame=50, obj_movement="Moving", obj_lane="EGO lane",
+        t_us=5_000_000, frame=50, obj_movement="Moving", obj_lane="Other",
         obj_confidence="High", x_rel=40.0, y_rel=4.0, z_rel=0.0,
         length=4.5, width=1.9, height=1.5, zrot=0.0,
     )
@@ -357,3 +357,88 @@ def test_the_corridor_is_reprojected_into_the_observations_ego_frame():
     out, side = corridor_excursion(trace.annotation.border_lines, obs, ex, ey, eyaw)
     assert side == "left", "reading the stale snapshot frame hides this entirely"
     assert out > 1.0
+
+
+# --- the annotation's lane label outranks the corridor ------------------
+
+def test_a_vehicle_the_annotation_put_in_a_lane_is_never_off_road():
+    """The Road Edge polylines don't necessarily span the whole carriageway.
+    On a divided motorway they frequently don't: ten vehicles labelled
+    "2nd Left" in split_046 sat up to 10.5 m beyond the annotated left edge
+    for their whole tracks, three of them never inside it, while travelling
+    within a few degrees of the ego's course. Geometry said "off road"; the
+    human annotator said "2nd Left", and the annotator is right.
+    """
+    from trace_fixer.geo.populate import populate_global_coords
+    from trace_fixer.geo.road_corridor import ON_ROAD_LANE_LABELS, corridor_excursion
+    from trace_fixer.geo.transform import EgoInterpolator
+    from trace_fixer.models import (
+        Annotation, BorderLine, EgoPose, EgoTrace, LaneSnapshot, Trace, VehicleObs, VehicleTrack,
+    )
+
+    poses = [
+        EgoPose(t_us=i * 100_000, lat_deg=0.0, lon_deg=0.0, heading_deg=270.0,
+                vx_mps=20.0, vy_mps=0.0, vz_mps=0.0)
+        for i in range(200)
+    ]
+    ego = EgoTrace(poses=poses)
+    border = {
+        1: BorderLine(obj_id=1, obj_type="Road Edge", snapshots=[
+            LaneSnapshot(t_us=0, frame=0, points_rel=[(float(x), 4.0) for x in range(-40, 121, 10)])
+        ])
+    }
+
+    def observation(lane):
+        # 8 m to the left: two lanes beyond an edge annotated at +4 m.
+        return VehicleObs(
+            t_us=5_000_000, frame=50, obj_movement="Moving", obj_lane=lane,
+            obj_confidence="High", x_rel=20.0, y_rel=8.0, z_rel=0.0,
+            length=4.5, width=1.9, height=1.5, zrot=0.0,
+        )
+
+    def excursion_for(lane):
+        obs = observation(lane)
+        trace = Trace(
+            trace_id="t", ego=ego,
+            annotation=Annotation(
+                country_code=None,
+                vehicles={1: VehicleTrack(obj_id=1, obj_type="Car", reflecting_parts=None, observations=[obs])},
+                border_lines=border,
+            ),
+        )
+        populate_global_coords(trace)
+        ex, ey, eyaw, _ = EgoInterpolator(ego).at(obs.t_us)
+        return corridor_excursion(trace.annotation.border_lines, obs, ex, ey, eyaw)
+
+    # Geometrically identical; only the annotator's label differs.
+    assert excursion_for("Other")[1] == "left", "fixture must be outside the corridor"
+    for lane in sorted(ON_ROAD_LANE_LABELS):
+        assert excursion_for(lane) == (0.0, None), f"{lane} is a lane, not off-road"
+
+
+def test_the_clamp_and_the_validator_agree_about_lane_labelled_vehicles():
+    """These two read the corridor through different code paths, and for a
+    while they disagreed: the check deferred to the lane label while the
+    clamp went on nudging the very same boxes toward the ego."""
+    from trace_fixer.geo.road_corridor import ON_ROAD_LANE_LABELS
+    from trace_fixer.scene import load_trace
+    from trace_fixer.validation.checks import run_validation
+    from trace_fixer.validation.fixes import apply_fixes
+
+    sample2 = REPO_ROOT / "data" / "traces" / "sample2_baseline_2"
+    trace = load_trace("sample2", sample2 / "adma.csv", sample2 / "annotation.xml")
+    assert all(
+        o.obj_lane in ON_ROAD_LANE_LABELS
+        for track in trace.annotation.vehicles.values()
+        for o in track.observations
+    ), "fixture must be entirely lane-labelled"
+
+    assert not any(
+        i.category in ("off_road", "road_departure") for i in run_validation(trace)
+    )
+    apply_fixes(trace, smoothing="off")
+    assert not any(
+        o.moved_from_original_m > 0.05
+        for track in trace.annotation.vehicles.values()
+        for o in track.observations
+    )

@@ -1,13 +1,18 @@
 """End-to-end smoke tests for the trace_fixer pipeline, run against the
-bundled sample trace (data/traces/sample1)."""
+bundled sample trace (data/traces/sample1_baseline_1)."""
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SAMPLE_DIR = REPO_ROOT / "data" / "traces" / "sample1"
-SAMPLE2_DIR = REPO_ROOT / "data" / "traces" / "sample2"
+SAMPLE_DIR = REPO_ROOT / "data" / "traces" / "sample1_baseline_1"
+SAMPLE2_DIR = REPO_ROOT / "data" / "traces" / "sample2_baseline_2"
+# A real motorway trace that still has off-road and road-departure
+# issues after the corridor check learned to defer to the annotation's
+# own lane labels. sample2's vehicles are all lane-labelled, so it no
+# longer exercises those categories at all -- only kinematic ones.
+OFFROAD_DIR = REPO_ROOT / "data" / "traces" / "LB-VS-271_20200722_split_068_MERGED_baseline_6"
 
 
 @pytest.fixture()
@@ -96,10 +101,15 @@ def test_scene_json_events_match_sample1s_known_phenomena(trace):
     assert {e["vehicle_id"] for e in events if e["type"] == "overtake"} == {1, 4, 5}
 
 
-def test_validation_finds_known_issues(trace2):
+def test_validation_finds_known_issues():
+    """Needs a trace with genuinely off-road vehicles, which sample2 no
+    longer provides: every one of its observations carries a numbered lane
+    label, and the corridor check now defers to that."""
+    from trace_fixer.scene import load_trace
     from trace_fixer.validation.checks import run_validation
 
-    issues = run_validation(trace2)
+    trace = load_trace("offroad", OFFROAD_DIR / "adma.csv", OFFROAD_DIR / "annotation.xml")
+    issues = run_validation(trace)
     assert len(issues) > 0
     assert any(i.category == "off_road" for i in issues)
     assert any(i.category == "kinematic" for i in issues)

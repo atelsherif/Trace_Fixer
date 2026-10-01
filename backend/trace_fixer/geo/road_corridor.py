@@ -58,6 +58,25 @@ OFFROAD_MARGIN_M = 0.3
 # accurate to the centimeter. Treated as inside the corridor.
 MIN_EXCURSION_M = 0.05
 
+# The annotation's own `obj_lane` values that place a vehicle *in a lane*.
+# That is the annotator's judgement about where the vehicle is, and it beats
+# anything inferred from the Road Edge polylines, because those polylines do
+# not necessarily span the whole carriageway.
+#
+# On a divided motorway they frequently don't. In split_046, ten vehicles
+# labelled "2nd Left" sit 2.5-10.5 m beyond the annotated left edge for
+# their entire tracks -- three of them never inside it for a single frame --
+# while travelling within a few degrees of the ego's own course. They are
+# not leaving the road; the corridor simply stops before their lane. Calling
+# that a road departure says the data is wrong when it is the corridor that
+# is incomplete, and it had the off-road clamp trying to drag traffic two
+# lanes over toward the ego.
+#
+# "Other" is the annotation's own value for a vehicle in no numbered lane,
+# so it stays eligible -- it is the label a genuine departure carries (174
+# of 395 departure observations across the corpus).
+ON_ROAD_LANE_LABELS = frozenset({"EGO lane", "1st Left", "2nd Left", "1st Right", "2nd Right"})
+
 
 def corridor_bounds(
     border_lines: dict[int, BorderLine],
@@ -115,11 +134,14 @@ def corridor_excursion(
     observation's own time.
 
     Returns (0.0, None) when the box is inside the corridor (or within
-    MIN_EXCURSION_M of the edge), or when there is no border geometry near it
-    to judge against. This *is* the off-road test, factored out so the fix
-    engine and the departure classifier can ask "how far out?" and not just
-    "out or not?".
+    MIN_EXCURSION_M of the edge), when there is no border geometry near it
+    to judge against, or when the annotation itself places it in a named
+    lane (see ON_ROAD_LANE_LABELS). This *is* the off-road test, factored
+    out so the fix engine and the departure classifier can ask "how far
+    out?" and not just "out or not?".
     """
+    if obs.obj_lane in ON_ROAD_LANE_LABELS:
+        return 0.0, None
     left, right = corridor_bounds(border_lines, obs.t_us, ego_x, ego_y, ego_yaw_rad, obs.x_rel)
     half_w = obs.width / 2.0
     out, side = 0.0, None

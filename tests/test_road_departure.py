@@ -13,7 +13,11 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SAMPLE2_DIR = REPO_ROOT / "data" / "traces" / "sample2"
+# A real motorway trace that still has off-road and road-departure
+# issues after the corridor check learned to defer to the annotation's
+# own lane labels. sample2's vehicles are all lane-labelled, so it no
+# longer exercises those categories at all -- only kinematic ones.
+OFFROAD_DIR = REPO_ROOT / "data" / "traces" / "LB-VS-271_20200722_split_068_MERGED_baseline_6"
 
 
 def _straight_border(obj_id, y_rel, times, x_from=-60.0, x_to=120.0, step=10.0):
@@ -45,7 +49,13 @@ def _track(y_rels, times, heading_deg=270.0, width=1.8):
                 t_us=t,
                 frame=i,
                 obj_movement="moving",
-                obj_lane="1st Right",
+                # "Other" rather than a numbered lane: the corridor check
+                # defers to the annotation's own lane label, and a vehicle
+                # the annotator placed in a lane is on the road whatever the
+                # Road Edge polylines say (see geo.road_corridor's
+                # ON_ROAD_LANE_LABELS). These fixtures are about vehicles
+                # that genuinely are not in a lane.
+                obj_lane="Other",
                 obj_confidence="high",
                 x_rel=20.0,
                 y_rel=y_rel,
@@ -139,10 +149,10 @@ def test_the_fix_engine_leaves_a_departing_vehicle_exactly_where_it_was():
     from trace_fixer.validation.checks import run_validation
     from trace_fixer.validation.fixes import apply_fixes
 
-    trace = load_trace("sample2", SAMPLE2_DIR / "adma.csv", SAMPLE2_DIR / "annotation.xml")
+    trace = load_trace("offroad", OFFROAD_DIR / "adma.csv", OFFROAD_DIR / "annotation.xml")
     issues = run_validation(trace)
     departures = [i for i in issues if i.category == "road_departure"]
-    assert departures, "sample2 must still contain a vehicle that leaves the ego's road"
+    assert departures, "fixture must still contain a vehicle that leaves the ego's road"
 
     recorded = {
         (track.obj_id, o.t_us): (o.x_m, o.y_m)
@@ -164,7 +174,7 @@ def test_a_departure_is_reported_for_review_and_never_marked_fixable():
     from trace_fixer.scene import load_trace
     from trace_fixer.validation.checks import run_validation
 
-    trace = load_trace("sample2", SAMPLE2_DIR / "adma.csv", SAMPLE2_DIR / "annotation.xml")
+    trace = load_trace("offroad", OFFROAD_DIR / "adma.csv", OFFROAD_DIR / "annotation.xml")
     departures = [i for i in run_validation(trace) if i.category == "road_departure"]
     assert departures
     for issue in departures:
@@ -184,7 +194,7 @@ def test_the_clamp_declines_corrections_larger_than_it_can_justify():
     from trace_fixer.validation.checks import run_validation
     from trace_fixer.validation.fixes import MAX_CLAMP_M, apply_fixes
 
-    trace = load_trace("sample2", SAMPLE2_DIR / "adma.csv", SAMPLE2_DIR / "annotation.xml")
+    trace = load_trace("offroad", OFFROAD_DIR / "adma.csv", OFFROAD_DIR / "annotation.xml")
     run_validation(trace)
     apply_fixes(trace)
 

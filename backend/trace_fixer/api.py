@@ -892,6 +892,52 @@ def export_openscenario_only(trace_id: str, pov_vehicle_id: int | None = None):
     }
 
 
+@app.get("/api/traces/{trace_id}/export/scenario")
+def export_scenario(trace_id: str, pov_vehicle_id: int | None = None, enrich: str | None = "osm"):
+    """The road network and the scenario that drives on it, written
+    together.
+
+    These were two buttons, which made it possible to export a .xosc that
+    named a .xodr nobody had written -- or worse, one written from an
+    earlier state of the trace. They are a matched pair by construction, so
+    they ship as one action.
+
+    `enrich` defaults to "osm": a real map's road name and lane-count hint
+    improve the road where the annotation is thin, and a failed lookup has
+    never been able to fail an export -- it falls back to the offline road
+    and the reason is reported in the response, which the GUI shows.
+    """
+    trace = _get_trace_or_404(trace_id)
+    enrichment, enrichment_error = None, None
+    if enrich:
+        enrichment, enrichment_error = fetch_enrichment(trace, enrich, cache_dir=OUTPUT_DIR / "map_cache")
+
+    # The road is the same from any point of view, so the .xosc references
+    # the non-POV .xodr -- but one carrying this trace's own provenance
+    # suffix, so a scenario and the road it names stay a matched pair even
+    # when the original and the fixed trace have both been exported.
+    road_suffix = provenance_suffix(trace)
+    suffix = provenance_suffix(trace, pov_vehicle_id=pov_vehicle_id)
+    xodr_path, _ = scenario_output_paths(trace_id, OUTPUT_DIR, road_suffix)
+    _, xosc_path = scenario_output_paths(trace_id, OUTPUT_DIR, suffix)
+
+    try:
+        xosc_text = generate_openscenario(trace, xodr_path.name, pov_vehicle_id=pov_vehicle_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    xodr_path.write_text(generate_opendrive(trace, enrichment=enrichment))
+    xosc_path.write_text(xosc_text)
+    return {
+        "files": [_relative_output_path(xodr_path), _relative_output_path(xosc_path)],
+        "enrichment": enrichment.provider if enrichment else None,
+        "enrichment_requested": enrich,
+        "enrichment_error": enrichment_error,
+        **_log_export(
+            "scenario", trace_id, suffix, [xodr_path, xosc_path], references_xodr=xodr_path.name
+        ),
+    }
+
+
 @app.get("/api/traces/{trace_id}/export/adp_yaml")
 def export_adp_yaml(
     trace_id: str, map_key: str | None = None, author_email: str | None = None, pov_vehicle_id: int | None = None
@@ -927,20 +973,32 @@ def export_adp_yaml(
 
 
 @app.get("/api/traces/{trace_id}/export/report")
-def export_report(trace_id: str, format: str = "txt"):
+def export_report(trace_id: str, format: str = "both"):
+    """`format` defaults to "both": the .txt is for a human and the .xml is
+    for a tool, they are the same content, and wanting one rarely means not
+    wanting the other. "txt" and "yml"-style single formats stay available
+    for API callers that genuinely want one file.
+    """
     trace = _get_trace_or_404(trace_id)
-    if format == "xml":
-        content = generate_xml_report(trace)
-    elif format == "txt":
-        content = generate_txt_report(trace)
+    if format == "both":
+        formats = ["txt", "xml"]
+    elif format in ("txt", "xml"):
+        formats = [format]
     else:
-        raise HTTPException(status_code=400, detail="format must be 'txt' or 'xml'")
+        raise HTTPException(status_code=400, detail="format must be 'txt', 'xml' or 'both'")
+
     suffix = provenance_suffix(trace)
-    out_path = report_output_path(trace_id, OUTPUT_DIR, format, suffix)
-    out_path.write_text(content)
+    written = []
+    for fmt in formats:
+        content = generate_xml_report(trace) if fmt == "xml" else generate_txt_report(trace)
+        out_path = report_output_path(trace_id, OUTPUT_DIR, fmt, suffix)
+        out_path.write_text(content)
+        written.append(out_path)
+    kind = "report" if len(written) > 1 else f"report_{formats[0]}"
     return {
-        "output_path": _relative_output_path(out_path),
-        **_log_export(f"report_{format}", trace_id, suffix, [out_path]),
+        "output_path": _relative_output_path(written[0]),
+        "files": [_relative_output_path(p) for p in written],
+        **_log_export(kind, trace_id, suffix, written),
     }
 
 

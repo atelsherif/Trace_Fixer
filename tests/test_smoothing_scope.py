@@ -11,8 +11,12 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SAMPLE1_DIR = REPO_ROOT / "data" / "traces" / "sample1"
-SAMPLE2_DIR = REPO_ROOT / "data" / "traces" / "sample2"
+SAMPLE1_DIR = REPO_ROOT / "data" / "traces" / "sample1_baseline_1"
+SAMPLE2_DIR = REPO_ROOT / "data" / "traces" / "sample2_baseline_2"
+# sample2's observations all carry a numbered lane label, so the corridor
+# check (and the clamp) correctly leave them alone -- it only exercises
+# smoothing now. This one still has genuinely off-lane vehicles.
+OFFROAD_DIR = REPO_ROOT / "data" / "traces" / "LB-VS-271_20200722_split_068_MERGED_baseline_6"
 
 
 @pytest.fixture()
@@ -58,34 +62,96 @@ def test_a_clean_trace_comes_back_untouched(sample1):
     assert sample1.provenance() == []
 
 
-def test_smoothing_off_leaves_positions_alone_but_still_clamps(sample2):
-    """"off" is a smoothing switch, not a fixing switch: the corridor clamp
-    and the trailing-overlap trim still run.
+@pytest.fixture()
+def offroad():
+    from trace_fixer.scene import load_trace
 
-    Measured by what the clamp *moved*, not by the off-road count dropping.
-    The clamp is rate-limited along the track (see _rate_limit_corrections),
-    so it ramps a correction in and out rather than stepping it -- which
-    means an observation at the edge of an excursion is deliberately left
-    partly outside the corridor, and still flagged, instead of being yanked
-    in and taking a lateral velocity spike with it.
+    return load_trace("offroad", OFFROAD_DIR / "adma.csv", OFFROAD_DIR / "annotation.xml")
+
+
+def test_smoothing_off_still_runs_the_corridor_clamp():
+    """"off" is a smoothing switch, not a fixing switch.
+
+    Built from a synthetic trace rather than a bundled one, because the
+    clamp does not fire anywhere in the 25-trace motorway corpus: every
+    candidate is either in a numbered lane (so the corridor's opinion does
+    not apply) or more than MAX_CLAMP_M outside it (so the correction is
+    declined as unjustifiable). Both are the right call, and both mean a
+    real trace cannot cover this path. The case the clamp exists for is a
+    box a few tens of centimetres outside the edge with no lane label.
     """
+    from trace_fixer.geo.populate import populate_global_coords
+    from trace_fixer.models import (
+        Annotation, BorderLine, EgoPose, EgoTrace, LaneSnapshot, Trace, VehicleObs, VehicleTrack,
+    )
+    from trace_fixer.validation.checks import run_validation
+    from trace_fixer.validation.fixes import MAX_CLAMP_M, apply_fixes
+
+    poses = []
+    for i in range(400):
+        p = EgoPose(t_us=i * 100_000, lat_deg=0.0, lon_deg=0.0, heading_deg=270.0,
+                    vx_mps=20.0, vy_mps=0.0, vz_mps=0.0)
+        poses.append(p)
+    ego = EgoTrace(poses=poses)
+
+    def edge(obj_id, y):
+        return BorderLine(obj_id=obj_id, obj_type="Road Edge", snapshots=[
+            LaneSnapshot(t_us=t, frame=i, points_rel=[(float(x), y) for x in range(-40, 201, 10)])
+            for i, t in enumerate(range(0, 40_000_000, 2_000_000))
+        ])
+
+    # Sits 0.4 m past the right edge -- noise, not a departure, and small
+    # enough that the clamp can justify correcting it.
+    obs = []
+    for i in range(12):
+        obs.append(VehicleObs(
+            t_us=5_000_000 + i * 400_000, frame=50 + i, obj_movement="Moving",
+            obj_lane="Other", obj_confidence="High",
+            x_rel=25.0, y_rel=-5.4, z_rel=0.0,
+            length=4.5, width=1.9, height=1.5, zrot=0.0,
+        ))
+    trace = Trace(
+        trace_id="clampable", ego=ego,
+        annotation=Annotation(
+            country_code=None,
+            vehicles={1: VehicleTrack(obj_id=1, obj_type="Car", reflecting_parts=None, observations=obs)},
+            border_lines={1: edge(1, 5.0), 2: edge(2, -4.0)},
+        ),
+    )
+    populate_global_coords(trace)
+
+    issues = run_validation(trace)
+    assert any(i.category == "off_road" for i in issues), "fixture must be off-road to begin with"
+
+    apply_fixes(trace, smoothing="off")
+    moved = [o.moved_from_original_m for o in trace.annotation.vehicles[1].observations]
+    assert max(moved) > 0.05, "the corridor clamp must still run with smoothing off"
+    assert max(moved) <= MAX_CLAMP_M + 1e-6
+
+
+def test_the_clamp_leaves_vehicles_the_annotation_placed_in_a_lane(sample2):
+    """sample2's observations all carry a numbered lane label, so the
+    corridor has no authority over them -- the validator says nothing and
+    the clamp must agree. These two used to disagree: the check deferred to
+    the lane label while the clamp went on nudging the same boxes."""
+    from trace_fixer.geo.road_corridor import ON_ROAD_LANE_LABELS
     from trace_fixer.validation.checks import run_validation
     from trace_fixer.validation.fixes import apply_fixes
 
-    run_validation(sample2)
-    kinematic_before = sum(1 for i in sample2.issues if i.category == "kinematic")
-    apply_fixes(sample2, smoothing="off")
-
-    # Nothing was smoothed, so the kinematic count is no worse than it was...
-    assert sum(1 for i in sample2.issues if i.category == "kinematic") <= kinematic_before
-    # ...and the clamp still moved boxes, which is the part "off" keeps.
-    moved = [
-        o.moved_from_original_m
+    assert all(
+        o.obj_lane in ON_ROAD_LANE_LABELS
         for track in sample2.annotation.vehicles.values()
         for o in track.observations
-        if o.moved_from_original_m > 0.05
-    ]
-    assert moved, "the corridor clamp must still run with smoothing off"
+    )
+    issues = run_validation(sample2)
+    assert not any(i.category in ("off_road", "road_departure") for i in issues)
+
+    apply_fixes(sample2, smoothing="off")
+    assert not any(
+        o.moved_from_original_m > 0.05
+        for track in sample2.annotation.vehicles.values()
+        for o in track.observations
+    ), "the clamp moved a box the validator had no complaint about"
 
 
 def test_smoothing_only_touches_what_validation_flagged(sample2):

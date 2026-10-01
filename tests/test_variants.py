@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SAMPLE1_DIR = REPO_ROOT / "data" / "traces" / "sample1"
+SAMPLE1_DIR = REPO_ROOT / "data" / "traces" / "sample1_baseline_1"
 
 
 @pytest.fixture()
@@ -102,7 +102,7 @@ def test_perturbed_observations_are_marked_fixed_so_annotation_export_includes_t
     assert all(o.fixed for o in track.observations)
 
     out_path = tmp_path / "out.xml"
-    original_path = Path("data/traces/sample1/annotation.xml")
+    original_path = Path("data/traces/sample1_baseline_1/annotation.xml")
     write_annotation_xml(variant.trace, original_path, out_path, include_predictions=False)
 
     import xml.etree.ElementTree as ET

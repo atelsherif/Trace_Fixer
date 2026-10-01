@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SAMPLE_DIR = REPO_ROOT / "data" / "traces" / "sample1"
-SAMPLE2_DIR = REPO_ROOT / "data" / "traces" / "sample2"
+SAMPLE_DIR = REPO_ROOT / "data" / "traces" / "sample1_baseline_1"
+SAMPLE2_DIR = REPO_ROOT / "data" / "traces" / "sample2_baseline_2"
 
 
 @pytest.fixture()

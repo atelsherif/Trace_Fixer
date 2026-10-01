@@ -6,8 +6,13 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SAMPLE1_DIR = REPO_ROOT / "data" / "traces" / "sample1"
-SAMPLE2_DIR = REPO_ROOT / "data" / "traces" / "sample2"
+SAMPLE1_DIR = REPO_ROOT / "data" / "traces" / "sample1_baseline_1"
+SAMPLE2_DIR = REPO_ROOT / "data" / "traces" / "sample2_baseline_2"
+# A real motorway trace that still has off-road and road-departure
+# issues after the corridor check learned to defer to the annotation's
+# own lane labels. sample2's vehicles are all lane-labelled, so it no
+# longer exercises those categories at all -- only kinematic ones.
+OFFROAD_DIR = REPO_ROOT / "data" / "traces" / "LB-VS-271_20200722_split_068_MERGED_baseline_6"
 
 
 @pytest.fixture()
@@ -31,6 +36,13 @@ def sample2():
     from trace_fixer.scene import load_trace
 
     return load_trace("sample2", SAMPLE2_DIR / "adma.csv", SAMPLE2_DIR / "annotation.xml")
+
+
+@pytest.fixture()
+def offroad():
+    from trace_fixer.scene import load_trace
+
+    return load_trace("offroad", OFFROAD_DIR / "adma.csv", OFFROAD_DIR / "annotation.xml")
 
 
 def test_register_scanned_creates_identity_row(conn):
@@ -72,19 +84,19 @@ def test_record_trace_populates_location_and_metadata(conn, sample1):
     assert row["processed_at"] is not None
 
 
-def test_record_trace_populates_phenomena_and_issues(conn, sample2):
+def test_record_trace_populates_phenomena_and_issues(conn, offroad):
     from trace_fixer.catalog import record_trace
     from trace_fixer.validation.checks import run_validation
 
-    run_validation(sample2)  # sample2 has real off_road/kinematic issues
-    record_trace(conn, sample2, SAMPLE2_DIR / "adma.csv", SAMPLE2_DIR / "annotation.xml")
+    run_validation(offroad)  # this one has real off_road/kinematic issues
+    record_trace(conn, offroad, OFFROAD_DIR / "adma.csv", OFFROAD_DIR / "annotation.xml")
 
     rows, _total = query_module_rows(conn)
     row = rows[0]
     issue_categories = {i["category"] for i in row["issues"]}
     assert "off_road" in issue_categories
     assert "kinematic" in issue_categories
-    assert sum(i["count"] for i in row["issues"]) == len(sample2.issues)
+    assert sum(i["count"] for i in row["issues"]) == len(offroad.issues)
 
 
 def test_record_trace_can_skip_phenomena_and_issues(conn, sample1):
@@ -115,13 +127,13 @@ def test_record_trace_replaces_rather_than_accumulates(conn, sample2):
     assert first_issue_total > 0  # sanity: there really was something to clear
 
 
-def test_query_filters_by_phenomenon_and_issue_category(conn, sample1, sample2):
+def test_query_filters_by_phenomenon_and_issue_category(conn, sample1, offroad):
     from trace_fixer.catalog import record_trace
     from trace_fixer.validation.checks import run_validation
 
     record_trace(conn, sample1, SAMPLE1_DIR / "adma.csv", SAMPLE1_DIR / "annotation.xml")  # has cut_in
-    run_validation(sample2)
-    record_trace(conn, sample2, SAMPLE2_DIR / "adma.csv", SAMPLE2_DIR / "annotation.xml")  # has off_road issues
+    run_validation(offroad)
+    record_trace(conn, offroad, OFFROAD_DIR / "adma.csv", OFFROAD_DIR / "annotation.xml")  # has off_road issues
 
     rows, total = query_module_rows(conn, phenomena=["cut_in"])
     assert total == 1
@@ -129,9 +141,9 @@ def test_query_filters_by_phenomenon_and_issue_category(conn, sample1, sample2):
 
     rows, total = query_module_rows(conn, issue_categories=["off_road"])
     assert total == 1
-    assert rows[0]["trace_id"] == "sample2"
+    assert rows[0]["trace_id"] == "offroad"
 
-    # combining a phenomenon sample1 has with a category only sample2 has -> no match
+    # combining a phenomenon sample1 has with a category only the other has -> no match
     rows, total = query_module_rows(conn, phenomena=["cut_in"], issue_categories=["off_road"])
     assert total == 0
 
