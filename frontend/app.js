@@ -24,10 +24,29 @@ const state = {
   variants: [],
   activeVariantId: null,
   baseScene: null, // the real trace's scene, saved while previewing a variant
+  drawErrorLogged: false,  // so a failing frame reports once, not 60x a second
 };
 
 const el = (id) => document.getElementById(id);
 const canvas = () => el("viewport");
+
+/** Attaches a listener, or complains and carries on if the element is
+ * missing.
+ *
+ * `el(id).addEventListener(...)` on an id the page doesn't have throws, and
+ * because every control is wired from one function, a single stale id took
+ * the whole app down with it: no trace picker, no animation loop, a blank
+ * viewport and a dead play button. One missing control should cost that
+ * control, not the application. */
+function on(id, type, handler, options) {
+  const node = el(id);
+  if (!node) {
+    console.warn(`[PreTwinner] no element #${id} to wire "${type}" to -- skipping.`);
+    return false;
+  }
+  node.addEventListener(type, handler, options);
+  return true;
+}
 
 /** Canvas colours, kept beside the CSS custom properties of the same names
  * in style.css -- a 2D context can't read a CSS variable, so the two have to
@@ -1477,24 +1496,24 @@ function wireMapPanelChrome() {
     window.addEventListener("pointerup", onUp);
   };
 
-  el("map-panel-header").addEventListener("pointerdown", (e) => {
+  on("map-panel-header", "pointerdown", (e) => {
     // Let the header's own controls work normally.
     if (e.target.closest("button, input, label")) return;
     beginDrag(e, "move");
   });
-  el("map-panel-resize").addEventListener("pointerdown", (e) => beginDrag(e, "resize"));
+  on("map-panel-resize", "pointerdown", (e) => beginDrag(e, "resize"));
 
-  el("map-panel-close").addEventListener("click", closeMapPanel);
-  el("map-panel-fit").addEventListener("click", () => {
+  on("map-panel-close", "click", closeMapPanel);
+  on("map-panel-fit", "click", () => {
     mapPanel.follow = false;
     el("map-panel-follow").checked = false;
     fitMapPanelToRoute();
   });
-  el("map-panel-follow").addEventListener("change", (e) => {
+  on("map-panel-follow", "change", (e) => {
     mapPanel.follow = e.target.checked;
     if (mapPanel.follow) updateMapPanelPosition(true);
   });
-  el("show-map-panel").addEventListener("change", (e) => {
+  on("show-map-panel", "change", (e) => {
     if (e.target.checked) openMapPanel();
     else closeMapPanel();
   });
@@ -1570,8 +1589,19 @@ function tick(nowMs) {
     state.lastFrameMs = nowMs;
     updateTimeLabel();
   }
-  draw();
-  updateMapPanelPosition();  // self-throttling; a no-op while the panel is closed
+  try {
+    draw();
+    updateMapPanelPosition();  // self-throttling; a no-op while the panel is closed
+  } catch (err) {
+    // tick() reschedules itself at the end, so an exception here used to
+    // stop the loop for good -- the window froze and the play button did
+    // nothing, with one stack trace in the console to explain it.
+    if (!state.drawErrorLogged) {
+      state.drawErrorLogged = true;
+      console.error("[PreTwinner] draw() failed; playback continues:", err);
+      setStatus(`Rendering error: ${err.message}`);
+    }
+  }
   requestAnimationFrame(tick);
 }
 
@@ -1581,11 +1611,11 @@ function wireControls() {
   window.addEventListener("resize", () => { resizeCanvas(); draw(); });
 
   // -- trace picker --
-  el("trace-picker-btn").addEventListener("click", () => {
+  on("trace-picker-btn", "click", () => {
     const panel = el("trace-picker-panel");
     if (panel.classList.contains("hidden")) openTracePicker(); else closeTracePicker();
   });
-  el("trace-search").addEventListener("input", (e) => onTraceSearchInput(e.target.value));
+  on("trace-search", "input", (e) => onTraceSearchInput(e.target.value));
   document.addEventListener("click", (e) => {
     const picker = document.querySelector(".trace-picker");
     if (picker && !picker.contains(e.target)) closeTracePicker();
@@ -1593,87 +1623,87 @@ function wireControls() {
     if (scan && !scan.contains(e.target)) el("scan-panel").classList.add("hidden");
   });
 
-  el("trace-prev").addEventListener("click", () => stepTrace("prev"));
-  el("trace-next").addEventListener("click", () => stepTrace("next"));
+  on("trace-prev", "click", () => stepTrace("prev"));
+  on("trace-next", "click", () => stepTrace("next"));
 
-  el("trace-page-prev").addEventListener("click", async () => {
+  on("trace-page-prev", "click", async () => {
     const offset = Math.max(0, lastListedOffset - TRACE_PAGE_SIZE);
     const data = await queryTraces(state.searchQuery, offset);
     renderTraceListbox(data.trace_ids, data.total, offset);
   });
-  el("trace-page-next").addEventListener("click", async () => {
+  on("trace-page-next", "click", async () => {
     const offset = lastListedOffset + TRACE_PAGE_SIZE;
     const data = await queryTraces(state.searchQuery, offset);
     renderTraceListbox(data.trace_ids, data.total, offset);
   });
 
-  el("batch-select-shown").addEventListener("click", () => {
+  on("batch-select-shown", "click", () => {
     for (const id of lastListedIds) state.selectedTraceIds.add(id);
     renderTraceListbox(lastListedIds, lastListedTotal, lastListedOffset);
     updateBatchControl();
   });
-  el("batch-clear-selection").addEventListener("click", () => {
+  on("batch-clear-selection", "click", () => {
     state.selectedTraceIds.clear();
     renderTraceListbox(lastListedIds, lastListedTotal, lastListedOffset);
     updateBatchControl();
   });
-  el("batch-run").addEventListener("click", runBatch);
+  on("batch-run", "click", runBatch);
 
   // -- scan directory --
-  el("scan-btn").addEventListener("click", () => {
+  on("scan-btn", "click", () => {
     el("scan-panel").classList.toggle("hidden");
     if (!el("scan-panel").classList.contains("hidden")) el("scan-path").focus();
   });
-  el("scan-run").addEventListener("click", runScan);
-  el("scan-path").addEventListener("keydown", (e) => { if (e.key === "Enter") runScan(); });
+  on("scan-run", "click", runScan);
+  on("scan-path", "keydown", (e) => { if (e.key === "Enter") runScan(); });
 
-  el("scan-browse-btn").addEventListener("click", () => {
+  on("scan-browse-btn", "click", () => {
     const panel = el("dir-browser");
     if (panel.classList.contains("hidden")) openDirBrowser(); else panel.classList.add("hidden");
   });
-  el("dir-browser-select").addEventListener("click", () => {
+  on("dir-browser-select", "click", () => {
     if (dirBrowserPath) el("scan-path").value = dirBrowserPath;
     el("dir-browser").classList.add("hidden");
   });
-  el("dir-browser-cancel").addEventListener("click", () => el("dir-browser").classList.add("hidden"));
+  on("dir-browser-cancel", "click", () => el("dir-browser").classList.add("hidden"));
 
-  el("scan-batch-catalog").addEventListener("click", () => runBatchAll("catalog"));
-  el("scan-batch-run").addEventListener("click", () => runBatchAll("run"));
+  on("scan-batch-catalog", "click", () => runBatchAll("catalog"));
+  on("scan-batch-run", "click", () => runBatchAll("run"));
 
   // -- catalog --
-  el("catalog-btn").addEventListener("click", openCatalog);
-  el("catalog-close").addEventListener("click", closeCatalog);
-  el("catalog-modal").addEventListener("click", (e) => {
+  on("catalog-btn", "click", openCatalog);
+  on("catalog-close", "click", closeCatalog);
+  on("catalog-modal", "click", (e) => {
     if (e.target.id === "catalog-modal") closeCatalog();
   });
   window.addEventListener("keydown", (e) => {
     if (e.key === "Escape" && !el("catalog-modal").classList.contains("hidden")) closeCatalog();
   });
-  el("catalog-search").addEventListener("input", (e) => {
+  on("catalog-search", "input", (e) => {
     clearTimeout(catalogSearchDebounce);
     catalogSearchDebounce = setTimeout(() => {
       catalogState.q = e.target.value.trim();
       loadCatalogPage(0);
     }, 150);
   });
-  el("catalog-page-prev").addEventListener("click", () => {
+  on("catalog-page-prev", "click", () => {
     loadCatalogPage(Math.max(0, catalogState.offset - CATALOG_PAGE_SIZE));
   });
-  el("catalog-page-next").addEventListener("click", () => {
+  on("catalog-page-next", "click", () => {
     loadCatalogPage(catalogState.offset + CATALOG_PAGE_SIZE);
   });
 
   // -- playback --
-  el("play-pause").addEventListener("click", togglePlayPause);
-  el("restart").addEventListener("click", () => {
+  on("play-pause", "click", togglePlayPause);
+  on("restart", "click", () => {
     state.timeS = 0;
     updateTimeLabel();
     draw();
     setPlaying(true);
   });
-  el("step-back").addEventListener("click", () => stepTime(-1));
-  el("step-forward").addEventListener("click", () => stepTime(1));
-  el("loop-toggle").addEventListener("change", (e) => { state.loop = e.target.checked; });
+  on("step-back", "click", () => stepTime(-1));
+  on("step-forward", "click", () => stepTime(1));
+  on("loop-toggle", "change", (e) => { state.loop = e.target.checked; });
 
   window.addEventListener("keydown", (e) => {
     const tag = (document.activeElement && document.activeElement.tagName) || "";
@@ -1684,7 +1714,7 @@ function wireControls() {
     else if (e.code === "Home") { e.preventDefault(); state.timeS = 0; setPlaying(false); updateTimeLabel(); draw(); }
   });
 
-  el("timeline").addEventListener("input", (e) => {
+  on("timeline", "input", (e) => {
     state.timeS = parseFloat(e.target.value);
     state.camera.followEgo = true;
     state.camera.followVehicleId = null;
@@ -1693,28 +1723,28 @@ function wireControls() {
     draw();
   });
 
-  el("playback-speed").addEventListener("change", (e) => {
+  on("playback-speed", "change", (e) => {
     state.playbackSpeed = parseFloat(e.target.value);
   });
 
-  el("zoom-in").addEventListener("click", () => { state.camera.zoom *= 1.3; draw(); });
-  el("zoom-out").addEventListener("click", () => { state.camera.zoom /= 1.3; draw(); });
-  el("recenter").addEventListener("click", () => {
+  on("zoom-in", "click", () => { state.camera.zoom *= 1.3; draw(); });
+  on("zoom-out", "click", () => { state.camera.zoom /= 1.3; draw(); });
+  on("recenter", "click", () => {
     state.camera.followEgo = true;
     state.camera.followVehicleId = null;
     draw();
   });
-  el("heading-up").addEventListener("change", (e) => { state.camera.headingUp = e.target.checked; draw(); });
-  el("gps-readout").addEventListener("click", copyGpsReadout);
-  el("show-lanes").addEventListener("change", (e) => { state.showLanes = e.target.checked; draw(); });
-  el("show-road-edges").addEventListener("change", (e) => { state.showRoadEdges = e.target.checked; draw(); });
-  el("show-static").addEventListener("change", (e) => { state.showStatic = e.target.checked; draw(); });
-  el("show-original").addEventListener("change", (e) => {
+  on("heading-up", "change", (e) => { state.camera.headingUp = e.target.checked; draw(); });
+  on("gps-readout", "click", copyGpsReadout);
+  on("show-lanes", "change", (e) => { state.showLanes = e.target.checked; draw(); });
+  on("show-road-edges", "change", (e) => { state.showRoadEdges = e.target.checked; draw(); });
+  on("show-static", "change", (e) => { state.showStatic = e.target.checked; draw(); });
+  on("show-original", "change", (e) => {
     state.showOriginal = e.target.checked;
     updateOriginalOverlayControl();
     draw();
   });
-  el("show-map-overlay").addEventListener("change", async (e) => {
+  on("show-map-overlay", "change", async (e) => {
     const checked = e.target.checked;
     const statusEl = el("map-overlay-status");
     if (!checked) {
@@ -1777,14 +1807,14 @@ function wireControls() {
   });
   window.addEventListener("mouseup", () => { state.drag = null; });
 
-  el("btn-validate").addEventListener("click", async () => {
+  on("btn-validate", "click", async () => {
     setStatus("Running validation…");
     const res = await apiPost(`/api/traces/${state.traceId}/validate`);
     applyScene(res.scene);
     setStatus(`Validation found ${res.issue_count} issue(s).`);
   });
 
-  el("btn-predict").addEventListener("click", async () => {
+  on("btn-predict", "click", async () => {
     setStatus("Predicting trajectories before/after the sensor FOV…");
     const horizonSRaw = el("predict-horizon-s").value.trim();
     const horizonMRaw = el("predict-horizon-m").value.trim();
@@ -1824,13 +1854,13 @@ function wireControls() {
     );
   });
 
-  el("btn-clear-predict").addEventListener("click", async () => {
+  on("btn-clear-predict", "click", async () => {
     const res = await apiPost(`/api/traces/${state.traceId}/predict/clear`);
     applyScene(res.scene);
     setStatus("Cleared predicted segments.");
   });
 
-  el("btn-fix").addEventListener("click", async () => {
+  on("btn-fix", "click", async () => {
     setStatus("Applying fixes…");
     const smoothing = el("fix-smoothing").value;
     const res = await apiPost(`/api/traces/${state.traceId}/fix`, { smoothing });
@@ -1838,16 +1868,16 @@ function wireControls() {
     setStatus(res.summary.length ? res.summary.join("\n") : "Nothing needed fixing — the trace is left exactly as recorded.");
   });
 
-  el("btn-reset").addEventListener("click", async () => {
+  on("btn-reset", "click", async () => {
     const res = await apiPost(`/api/traces/${state.traceId}/reset`);
     applyScene(res.scene);
     setStatus("Trace reset to original files.");
   });
 
-  el("export-fixed-trace").addEventListener("click", () =>
+  on("export-fixed-trace", "click", () =>
     runExport("fixed trace", `/api/traces/${state.traceId}/export/fixed_trace`)
   );
-  el("export-scenario").addEventListener("click", () => {
+  on("export-scenario", "click", () => {
     // One call writes both: the .xosc names the .xodr the same call wrote,
     // so the pair can never drift apart. OSM enrichment is on by default
     // server-side and reports its own failure in the status line.
@@ -1855,7 +1885,7 @@ function wireControls() {
     const params = povId ? `?pov_vehicle_id=${encodeURIComponent(povId)}` : "";
     runExport("OpenDRIVE + OpenSCENARIO", `/api/traces/${state.traceId}/export/scenario${params}`);
   });
-  el("export-adp-yaml").addEventListener("click", () => {
+  on("export-adp-yaml", "click", () => {
     const mapKey = el("adp-map-key").value.trim();
     const povId = el("pov-vehicle-select").value;
     const params = new URLSearchParams();
@@ -1864,31 +1894,31 @@ function wireControls() {
     const qs = params.toString();
     runExport("ADP scenario", `/api/traces/${state.traceId}/export/adp_yaml${qs ? `?${qs}` : ""}`);
   });
-  el("export-report").addEventListener("click", () =>
+  on("export-report", "click", () =>
     runExport("report", `/api/traces/${state.traceId}/export/report`)
   );
 
-  el("variants-generate-preset").addEventListener("click", () => generateVariants("preset"));
-  el("variants-randomize").addEventListener("click", () => generateVariants("randomized"));
-  el("variant-back-to-original").addEventListener("click", () => exitVariantPreview());
-  el("variant-export-fixed").addEventListener("click", () => {
+  on("variants-generate-preset", "click", () => generateVariants("preset"));
+  on("variants-randomize", "click", () => generateVariants("randomized"));
+  on("variant-back-to-original", "click", () => exitVariantPreview());
+  on("variant-export-fixed", "click", () => {
     if (!state.activeVariantId) return;
     runExport("variant fixed trace", `/api/traces/${state.traceId}/variants/${state.activeVariantId}/export/fixed_trace`);
   });
-  el("variant-export-openscenario").addEventListener("click", () => {
+  on("variant-export-openscenario", "click", () => {
     if (!state.activeVariantId) return;
     runExport("variant OpenSCENARIO", `/api/traces/${state.traceId}/variants/${state.activeVariantId}/export/openscenario`);
   });
-  el("variant-export-adp").addEventListener("click", () => {
+  on("variant-export-adp", "click", () => {
     if (!state.activeVariantId) return;
     runExport("variant ADP scenario", `/api/traces/${state.traceId}/variants/${state.activeVariantId}/export/adp_yaml`);
   });
 
-  el("upload-btn").addEventListener("click", () => el("upload-adma").click());
-  el("upload-adma").addEventListener("change", () => {
+  on("upload-btn", "click", () => el("upload-adma").click());
+  on("upload-adma", "change", () => {
     if (el("upload-adma").files.length) el("upload-annotation").click();
   });
-  el("upload-annotation").addEventListener("change", async () => {
+  on("upload-annotation", "change", async () => {
     const admaFile = el("upload-adma").files[0];
     const annotationFile = el("upload-annotation").files[0];
     if (!admaFile || !annotationFile) return;
@@ -2286,8 +2316,18 @@ let catalogSearchDebounce = null;
 
 async function init() {
   resizeCanvas();
-  wireControls();
-  wireMapPanelChrome();
+  // The render loop starts first and independently: if anything below
+  // fails, the viewport must still draw and play rather than freezing with
+  // no explanation. tick() reschedules itself, so an exception inside it
+  // would end playback permanently -- hence the guard there too.
+  requestAnimationFrame(tick);
+  try {
+    wireControls();
+    wireMapPanelChrome();
+  } catch (err) {
+    setStatus(`Some controls failed to initialize: ${err.message}. Try a hard refresh (Ctrl/Cmd+Shift+R).`);
+    console.error(err);
+  }
   await initTracePicker();
   try {
     const status = await apiGet("/api/batch/all/status");
@@ -2299,7 +2339,6 @@ async function init() {
   } catch {
     // best-effort resume of an in-progress batch after a page reload
   }
-  requestAnimationFrame(tick);
 }
 
 init().catch((err) => setStatus(`Error: ${err.message}`));

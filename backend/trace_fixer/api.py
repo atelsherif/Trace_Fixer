@@ -1023,5 +1023,30 @@ def list_exports(limit: int = 50, trace_id: str | None = None):
     return {"exports": entries[::-1][:limit]}
 
 
+class _RevalidatingStaticFiles(StaticFiles):
+    """Serves the frontend with `Cache-Control: no-cache`.
+
+    Not "don't cache" -- "always ask". The browser keeps the file and the
+    ETag, so an unchanged asset still comes back 304 Not Modified with no
+    body; it just can't serve a stale one without checking first.
+
+    This exists because of a real failure: index.html carried a `?v=`
+    cache-buster on style.css but none on app.js, so after an update a
+    browser paired the *new* HTML with a *cached* app.js. The old script
+    wired an element the new page no longer had, threw inside
+    wireControls(), and took down init() before it could populate the trace
+    picker or start the animation loop -- a blank viewport, a picker stuck
+    on "Loading...", and a dead play button, with nothing in the console
+    pointing at caching. Version-stamping every asset by hand is the kind
+    of discipline that fails exactly once and confusingly; for a local tool
+    serving a handful of files off localhost, revalidating is free.
+    """
+
+    def file_response(self, *args, **kwargs):
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 if FRONTEND_DIR.exists():
-    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
+    app.mount("/", _RevalidatingStaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")

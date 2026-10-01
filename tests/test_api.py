@@ -740,3 +740,44 @@ def test_pov_export_400_for_an_unknown_vehicle_id(client_with_corpus):
 
     r = client.get(f"/api/traces/{trace_id}/export/adp_yaml", params={"pov_vehicle_id": 9999})
     assert r.status_code == 400
+
+
+def test_frontend_assets_are_served_with_no_cache(client_with_corpus):
+    """A browser must never pair a new index.html with a cached app.js.
+
+    It did once: index.html carried a `?v=` stamp on style.css and none on
+    app.js, so after an update the old script wired a control the new page
+    had dropped, threw inside wireControls(), and took down init() before
+    it could populate the trace picker or start the render loop. The
+    symptoms -- a picker stuck on "Loading...", a blank viewport, a dead
+    play button -- pointed nowhere near caching.
+
+    `no-cache` means "always revalidate", not "never store": an unchanged
+    file still comes back 304 with no body.
+    """
+    client, _names, _output_dir = client_with_corpus
+    for path in ("/", "/app.js", "/style.css", "/vendor/leaflet/leaflet.js"):
+        r = client.get(path)
+        assert r.status_code == 200, path
+        assert r.headers.get("cache-control") == "no-cache", path
+        assert r.headers.get("etag"), f"{path} needs an ETag for revalidation to be free"
+
+    etag = client.get("/app.js").headers["etag"]
+    revalidated = client.get("/app.js", headers={"If-None-Match": etag})
+    assert revalidated.status_code == 304
+    assert not revalidated.content
+
+
+def test_index_html_version_stamps_every_asset_it_owns():
+    """Belt and braces for anyone serving frontend/ without the app. The
+    point of failure was asymmetry -- one stamped asset and one unstamped
+    one -- so this asserts they move together rather than asserting a
+    particular version."""
+    import re
+
+    html = (REPO_ROOT / "frontend" / "index.html").read_text()
+    own_assets = re.findall(r'(?:href|src)="((?:app\.js|style\.css)[^"]*)"', html)
+    assert len(own_assets) == 2, f"expected app.js and style.css, got {own_assets}"
+    versions = {a.split("?v=")[1] if "?v=" in a else None for a in own_assets}
+    assert None not in versions, f"every first-party asset needs a ?v= stamp: {own_assets}"
+    assert len(versions) == 1, f"stamps must be bumped together, got {own_assets}"

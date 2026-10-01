@@ -4,17 +4,20 @@
   <meta charset="utf-8" />
   <title>PreTwinner</title>
   <link id="favicon-link" rel="icon" href="logo.png" onerror="this.href='data:,'" />
-  <!-- ?v= is bumped whenever style.css changes in a way that would look
-       broken against a cached copy -- a browser holding the previous
-       style.css rendered the topbar logo below at its natural size
-       (a full-page-wide image) because the rule sizing it was missing. -->
+  <!-- The server sends Cache-Control: no-cache for everything under
+       frontend/ (see _RevalidatingStaticFiles in api.py), so these ?v=
+       stamps are belt-and-braces for anyone serving this directory some
+       other way. They matter: style.css carried one and app.js did not, so
+       an update once paired a new index.html with a cached app.js -- the
+       old script wired a control the new page had dropped, threw, and took
+       the whole startup down with it. Bump both together, or neither. -->
   <!-- Vendored, not from a CDN: this is a local tool that has to start and
        render with no internet at all. Tiles obviously still need a network,
        but the panel itself comes up and says so rather than the whole page
        failing on a blocked script. -->
   <link rel="stylesheet" href="vendor/leaflet/leaflet.css" />
   <script src="vendor/leaflet/leaflet.js"></script>
-  <link rel="stylesheet" href="style.css?v=6" />
+  <link rel="stylesheet" href="style.css?v=7" />
 </head>
 <body>
   <header class="topbar">
@@ -364,6 +367,6 @@
     </label>
   </footer>
 
-  <script src="app.js"></script>
+  <script src="app.js?v=7"></script>
 </body>
 </html>
